@@ -694,7 +694,9 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
     if (g_system->getArgs().isViewportsEnabled()) {
         io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
     }
+#ifndef __APPLE__
     io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports;
+#endif
     // io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;
 
     ImGui_ImplGlfw_InitForOpenGL(m_window, true);
@@ -1006,6 +1008,11 @@ void PCSX::GUI::startFrame() {
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+#ifdef __APPLE__
+    // Fonts are loaded at Retina pixel size (2x) for sharpness, but ImGui layout
+    // should use logical (1x) coordinates. Scale font rendering down accordingly.
+    io.FontGlobalScale = 1.0f / io.DisplayFramebufferScale.x;
+#endif
     ImGui::NewFrame();
     MarkDown::newFrame();
     if (io.WantSaveIniSettings) {
