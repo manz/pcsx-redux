@@ -19,7 +19,9 @@
 
 #pragma once
 
+#ifndef PCSX_METAL
 #include <GL/gl3w.h>
+#endif
 #include <stdarg.h>
 
 #include <functional>
@@ -174,10 +176,12 @@ class GUI final : public UI {
         g_gui->glfwKeyCallback(window, key, scancode, action, mods);
     }
     void glfwKeyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
+#ifndef PCSX_METAL
     void glErrorCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *message);
-    void changeScale(float scale);
     bool m_onlyLogGLErrors = false;
     std::vector<std::string> m_glErrors;
+#endif
+    void changeScale(float scale);
 
   public:
     struct MarkDown : public imgui_md {
@@ -196,6 +200,14 @@ class GUI final : public UI {
         static unsigned m_id;
     };
     static void openUrl(std::string_view url);
+#ifdef PCSX_METAL
+    void setOnlyLogGLErrors(bool) {}
+    class ScopedOnlyLog {
+      public:
+        ScopedOnlyLog(GUI *) {}
+    };
+    std::vector<std::string> getGLerrors() { return {}; }
+#else
     void setOnlyLogGLErrors(bool value) { m_onlyLogGLErrors = value; }
     class ScopedOnlyLog {
       public:
@@ -206,6 +218,7 @@ class GUI final : public UI {
         GUI *m_gui = nullptr;
     };
     std::vector<std::string> getGLerrors() { return std::move(m_glErrors); }
+#endif
     GUI(std::vector<std::string> &favorites);
     ~GUI() {
         assert(g_gui == this);
@@ -294,15 +307,21 @@ class GUI final : public UI {
 
   private:
     GLFWwindow *m_window = nullptr;
+#ifdef PCSX_METAL
+    void *m_metalCtx = nullptr;
+#else
     bool m_hasCoreProfile = false;
+#endif
     int &m_glfwPosX = settings.get<WindowPosX>().value;
     int &m_glfwPosY = settings.get<WindowPosY>().value;
     int &m_glfwSizeX = settings.get<WindowSizeX>().value;
     int &m_glfwSizeY = settings.get<WindowSizeY>().value;
     bool &m_glfwMaximized = settings.get<WindowMaximized>().value;
+#ifndef PCSX_METAL
     GLuint m_VRAMTexture = 0;
     NVGcontext *m_nvgContext = nullptr;
     std::map<unsigned, void *> m_nvgSubContextes;
+#endif
     std::vector<ImWchar> m_baseFontRanges;
 
     unsigned int m_offscreenFrameBuffer = 0;
@@ -433,7 +452,9 @@ class GUI final : public UI {
     Widgets::LuaInspector m_luaInspector = {settings.get<ShowLuaInspector>().value};
 
     bool m_gotImguiUserError = false;
+#ifndef PCSX_METAL
     bool m_reportGLErrors = false;
+#endif
     std::string m_imguiUserError;
 
     std::map<float, ImFont *> m_mainFonts;

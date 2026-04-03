@@ -26,8 +26,10 @@
 // And only then we can load the rest
 #define GLFW_INCLUDE_NONE
 #define IMGUI_DEFINE_MATH_OPERATORS
+#ifndef PCSX_METAL
 #define NANOVG_GLES3_IMPLEMENTATION
 #include <GL/gl3w.h>
+#endif
 #include <GLFW/glfw3.h>
 #include <assert.h>
 extern "C" {
@@ -71,7 +73,12 @@ extern "C" {
 #include "gui/shaders/crt-lottes.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
+#ifndef PCSX_METAL
 #include "imgui_impl_opengl3.h"
+#endif
+#ifdef PCSX_METAL
+#include "gui/gui_metal.h"
+#endif
 #include "imgui_internal.h"
 #include "imgui_stdlib.h"
 #include "json.hpp"
@@ -290,6 +297,7 @@ ImFont* PCSX::GUI::loadFont(const PCSX::u8string& name, int size, ImGuiIO& io, c
     return ret;
 }
 
+#ifndef PCSX_METAL
 void PCSX::GUI::glErrorCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
                                 const GLchar* message) {
     const auto severityFilter = g_emulator->settings.get<Emulator::SettingGLErrorReportingSeverity>().value;
@@ -374,6 +382,7 @@ void PCSX::GUI::glErrorCallback(GLenum source, GLenum type, GLuint id, GLenum se
         if (type == GL_DEBUG_TYPE_ERROR) throw std::runtime_error("Got an OpenGL error");
     }
 }
+#endif  // !PCSX_METAL
 
 void PCSX::GUI::setLua(Lua L) {
     setLuaCommon(L);
@@ -473,6 +482,7 @@ void PCSX::GUI::setLua(Lua L) {
     L.pop();
     L.pop();
     L.pop();
+#ifndef PCSX_METAL
     auto offscreenStatus = m_offscreenShaderEditor.compile(this);
     auto outputStatus = m_outputShaderEditor.compile(this);
     if (!offscreenStatus.isOk() || !outputStatus.isOk()) {
@@ -486,9 +496,11 @@ void PCSX::GUI::setLua(Lua L) {
         g_system->log(LogClass::UI, "%s", offscreenStatus.getError());
         g_system->log(LogClass::UI, "%s", outputStatus.getError());
     }
+#endif
 }
 
 void PCSX::GUI::setDefaultShaders() {
+#ifndef PCSX_METAL
     m_offscreenShaderEditor.setDefaults();
     auto offscreenStatus = m_offscreenShaderEditor.compile(this);
     m_outputShaderEditor.setDefaults();
@@ -508,6 +520,7 @@ void PCSX::GUI::setDefaultShaders() {
 
     m_offscreenShaderEditor.reset(this);
     m_outputShaderEditor.reset(this);
+#endif
 }
 
 void PCSX::GUI::init(std::function<void()> applyArguments) {
@@ -519,10 +532,13 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
     };
     bool luaStdout = g_system->getArgs().isLuaStdoutEnabled();
     m_luaConsole.setCmdExec([this, luaStdout](const std::string& cmd) {
+#ifndef PCSX_METAL
         ScopedOnlyLog scopedOnlyLog(this);
+#endif
         try {
             g_emulator->m_lua->load(cmd, "console:", false);
             g_emulator->m_lua->pcall();
+#ifndef PCSX_METAL
             for (const auto& error : m_glErrors) {
                 m_luaConsole.addError(error);
                 if (luaStdout) {
@@ -531,6 +547,7 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
                 }
             }
             m_glErrors.clear();
+#endif
         } catch (std::exception& e) {
             m_luaConsole.addError(e.what());
             if (luaStdout) {
@@ -559,6 +576,13 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
         setRawMouseMotion();
     });
 
+#ifdef PCSX_METAL
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    m_window = glfwCreateWindow(1280, 800, "PCSX-Redux", nullptr, nullptr);
+    if (!m_window) {
+        throw std::runtime_error("Unable to create main window.");
+    }
+#else
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -585,6 +609,7 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
     }
     glfwMakeContextCurrent(m_window);
     glfwSwapInterval(0);
+#endif
 
     s_this = this;
     glfwSetDropCallback(m_window, drop_callback);
@@ -602,6 +627,7 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
         glfwSetWindowIcon(m_window, 1, &image);
     });
 
+#ifndef PCSX_METAL
     result = gl3wInit();
     if (result) {
         throw std::runtime_error("Unable to initialize OpenGL layer. Check OpenGL drivers.");
@@ -622,6 +648,7 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
     } else {
         g_system->log(LogClass::UI, "Warning: Unable to initialize NanoVG. Check OpenGL drivers.\n");
     }
+#endif
 
     // Setup ImGui binding
     IMGUI_CHECKVERSION();
@@ -699,7 +726,9 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
 #endif
     // io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;
 
+#ifndef PCSX_METAL
     ImGui_ImplGlfw_InitForOpenGL(m_window, true);
+#endif
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
     io.SetClipboardTextFn = [](void*, const char* text) -> void { clip::set_text(text); };
     io.GetClipboardTextFn = [](void*) -> const char* {
@@ -713,7 +742,9 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
         auto window = getGLFWwindowFromImGuiViewport(viewport);
         glfwSetKeyCallback(window, glfwKeyCallbackTrampoline);
         auto id = viewport->ID;
+#ifndef PCSX_METAL
         g_gui->m_nvgSubContextes[id] = nvgCreateSubContextGL(g_gui->m_nvgContext);
+#endif
     };
     m_onChangedViewportOldCallback = platform_io.Platform_OnChangedViewport;
     platform_io.Platform_OnChangedViewport = [](ImGuiViewport* viewport) {
@@ -722,6 +753,7 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
     };
     m_destroyWindowOldCallback = platform_io.Platform_DestroyWindow;
     platform_io.Platform_DestroyWindow = [](ImGuiViewport* viewport) {
+#ifndef PCSX_METAL
         auto id = viewport->ID;
         auto& subContextes = g_gui->m_nvgSubContextes;
         auto subContext = subContextes.find(id);
@@ -729,9 +761,13 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
             nvgDeleteSubContextGL(subContext->second);
             subContextes.erase(subContext);
         }
+#endif
         if (g_gui->m_destroyWindowOldCallback) g_gui->m_destroyWindowOldCallback(viewport);
     };
     glfwSetKeyCallback(m_window, glfwKeyCallbackTrampoline);
+#ifdef PCSX_METAL
+    m_metalCtx = MetalUI::init(m_window);
+#else
     // Some bad GPU drivers (*cough* Intel) don't like mixed shaders versions,
     // and will silently fail to execute them.
     // This is just a bad heuristic to try and keep it the same version.
@@ -761,11 +797,14 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
     glGenFramebuffers(1, &m_offscreenFrameBuffer);
     glGenTextures(2, m_offscreenTextures);
     glGenRenderbuffers(1, &m_offscreenDepthBuffer);
+#endif
 
     m_mainVRAMviewer.setMain();
     m_mainVRAMviewer.setTitle(l_("Main VRAM Viewer"));
     m_clutVRAMviewer.setTitle(l_("CLUT VRAM selector"));
+#ifndef PCSX_METAL
     m_memcardManager.initTextures();
+#endif
 
     unsigned counter = 1;
     for (auto& viewer : m_VRAMviewers) {
@@ -830,8 +869,10 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
     m_biosEditor.editor.ExportFn = EXPORT_FUNC("bios");
     m_vramEditor.editor.ExportFn = EXPORT_FUNC("vram");
 
+#ifndef PCSX_METAL
     m_offscreenShaderEditor.init();
     m_outputShaderEditor.init();
+#endif
 
     m_listener.listen<Events::GUI::JumpToMemory>([this](auto& event) {
         const uint32_t base = (event.address >> 20) & 0xff8;
@@ -881,16 +922,23 @@ void PCSX::GUI::init(std::function<void()> applyArguments) {
 }
 
 void PCSX::GUI::close() {
+#ifdef PCSX_METAL
+    MetalUI::shutdown(m_metalCtx);
+    m_metalCtx = nullptr;
+#else
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
+#endif
     ImGui::DestroyContext();
     glfwDestroyWindow(m_window);
     glfwTerminate();
+#ifndef PCSX_METAL
     for (auto& subContext : m_nvgSubContextes) {
         nvgDeleteSubContextGL(subContext.second);
     }
     m_nvgSubContextes.clear();
     nvgDeleteGLES3(m_nvgContext);
+#endif
 }
 
 void PCSX::GUI::saveCfg() {
@@ -949,6 +997,7 @@ void PCSX::GUI::startFrame() {
         m_renderSize = m_fullWindowRender ? ImVec2(w, h) : m_outputWindowSize;
         ImGuiHelpers::normalizeDimensions(m_renderSize, renderRatio);
 
+#ifndef PCSX_METAL
         // Reset texture and framebuffer storage
         glBindTexture(GL_TEXTURE_2D, m_offscreenTextures[0]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_renderSize.x, m_renderSize.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
@@ -972,6 +1021,7 @@ void PCSX::GUI::startFrame() {
 
         glBindRenderbuffer(GL_RENDERBUFFER, m_offscreenDepthBuffer);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, m_renderSize.x, m_renderSize.y);
+#endif
         m_setupScreenSize = false;
     }
 
@@ -983,7 +1033,11 @@ void PCSX::GUI::startFrame() {
         auto scales = m_allScales;
         if (scales.empty()) scales.emplace(1.0f);
 
+#ifdef PCSX_METAL
+        MetalUI::destroyFontsTexture(m_metalCtx);
+#else
         ImGui_ImplOpenGL3_DestroyFontsTexture();
+#endif
         m_mainFonts.clear();
         m_monoFonts.clear();
 
@@ -1003,10 +1057,18 @@ void PCSX::GUI::startFrame() {
         }
         io.Fonts->Build();
         io.FontDefault = m_mainFonts.begin()->second;
+#ifdef PCSX_METAL
+        MetalUI::createFontsTexture(m_metalCtx);
+#else
         ImGui_ImplOpenGL3_CreateFontsTexture();
+#endif
     }
 
+#ifdef PCSX_METAL
+    MetalUI::newFrame(m_metalCtx);
+#else
     ImGui_ImplOpenGL3_NewFrame();
+#endif
     ImGui_ImplGlfw_NewFrame();
 #ifdef __APPLE__
     // Fonts are loaded at Retina pixel size (2x) for sharpness, but ImGui layout
@@ -1019,11 +1081,13 @@ void PCSX::GUI::startFrame() {
         io.WantSaveIniSettings = false;
         saveCfg();
     }
+#ifndef PCSX_METAL
     glBindFramebuffer(GL_FRAMEBUFFER, m_offscreenFrameBuffer);
     GLenum DrawBuffers[1] = {GL_COLOR_ATTACHMENT0};
 
     // this call seems to sometime fails when the window is minimized...?
     glDrawBuffers(1, DrawBuffers);  // "1" is the size of DrawBuffers
+#endif
 
     // If kiosk mode is enabled, ignore hotkeys
     if (g_emulator->settings.get<Emulator::SettingKioskMode>().value) return;
@@ -1073,9 +1137,14 @@ void PCSX::GUI::startFrame() {
     }
 }
 
-void PCSX::GUI::setViewport() { glViewport(0, 0, m_renderSize.x, m_renderSize.y); }
+void PCSX::GUI::setViewport() {
+#ifndef PCSX_METAL
+    glViewport(0, 0, m_renderSize.x, m_renderSize.y);
+#endif
+}
 
 void PCSX::GUI::flip() {
+#ifndef PCSX_METAL
     glBindFramebuffer(GL_FRAMEBUFFER, m_offscreenFrameBuffer);
     glBindTexture(GL_TEXTURE_2D, m_offscreenTextures[m_currentTexture]);
 
@@ -1092,6 +1161,7 @@ void PCSX::GUI::flip() {
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glDisable(GL_CULL_FACE);
+#endif
     m_currentTexture ^= 1;
 }
 
@@ -1132,15 +1202,19 @@ void PCSX::GUI::endFrame() {
         clip::image img(screenshot.data.data(), spec);
         clip::set_image(img.to_rgba8888());
     }
+#ifndef PCSX_METAL
     // bind back the output frame buffer
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+#endif
     auto& emuSettings = PCSX::g_emulator->settings;
     auto& debugSettings = emuSettings.get<Emulator::SettingDebugSettings>();
 
     bool changed = false;
 
+#ifndef PCSX_METAL
     m_offscreenShaderEditor.configure(this);
     m_outputShaderEditor.configure(this);
+#endif
 
     ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(0, nullptr, ImGuiDockNodeFlags_PassthruCentralNode);
     ImGuiContext* context = ImGui::GetCurrentContext();
@@ -1164,7 +1238,11 @@ void PCSX::GUI::endFrame() {
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                          ImGuiWindowFlags_NoBringToFrontOnFocus);
-        if (g_system->getArgs().isShadersDisabled()) {
+        if (g_system->getArgs().isShadersDisabled()
+#ifdef PCSX_METAL
+            || true
+#endif
+        ) {
             ImGui::Image(texture, logicalRenderSize, ImVec2(0, 0), ImVec2(1, 1));
         } else {
             m_outputShaderEditor.renderWithImgui(this, texture, m_renderSize, logicalRenderSize);
@@ -1193,7 +1271,11 @@ void PCSX::GUI::endFrame() {
             ImGuiHelpers::normalizeDimensions(textureSize, renderRatio);
             ImGui::SetCursorPos(ImGui::GetCursorPos() + (contentRegion - textureSize) * 0.5f);
             ImTextureID texture = m_offscreenTextures[m_currentTexture];
-            if (g_system->getArgs().isShadersDisabled()) {
+            if (g_system->getArgs().isShadersDisabled()
+#ifdef PCSX_METAL
+                || true
+#endif
+            ) {
                 ImGui::Image(texture, textureSize, ImVec2(0, 0), ImVec2(1, 1));
             } else {
                 m_outputShaderEditor.renderWithImgui(this, texture, m_renderSize, textureSize);
@@ -1581,6 +1663,7 @@ in Configuration->Emulation, restart PCSX-Redux, then try again.)"));
 
     ImGui::SetNextWindowPos(ImVec2(10, 20), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(1024, 512), ImGuiCond_FirstUseEver);
+#ifndef PCSX_METAL
     if (m_mainVRAMviewer.m_show) m_mainVRAMviewer.draw(this, g_emulator->m_gpu->getVRAMTexture());
     if (m_clutVRAMviewer.m_show) m_clutVRAMviewer.draw(this, g_emulator->m_gpu->getVRAMTexture());
     for (auto& viewer : m_VRAMviewers) {
@@ -1588,6 +1671,7 @@ in Configuration->Emulation, restart PCSX-Redux, then try again.)"));
             viewer.draw(this, g_emulator->m_gpu->getVRAMTexture());
         }
     }
+#endif
 
     if (m_log.m_show) {
         ImGui::SetNextWindowPos(ImVec2(10, 540), ImGuiCond_FirstUseEver);
@@ -1706,6 +1790,7 @@ in Configuration->Emulation, restart PCSX-Redux, then try again.)"));
     if (m_showAbout) changed |= about();
     if (m_showInterruptsScaler) interruptsScaler();
 
+#ifndef PCSX_METAL
     if (m_outputShaderEditor.m_show && m_outputShaderEditor.draw(this, _("Output Video"))) {
         // maybe throttle this?
         m_outputShaderEditor.compile(this);
@@ -1715,6 +1800,7 @@ in Configuration->Emulation, restart PCSX-Redux, then try again.)"));
         // maybe throttle this?
         m_offscreenShaderEditor.compile(this);
     }
+#endif
 
     if (m_pioCart.m_show) {
         changed |= m_pioCart.draw(_("PIO Cartridge Configuration"));
@@ -1937,9 +2023,12 @@ the update and manually apply it.)")));
     auto L = *g_emulator->m_lua;
     L.getfield("DrawImguiFrame", LUA_GLOBALSINDEX);
     if (!L.isnil()) {
+#ifndef PCSX_METAL
         ScopedOnlyLog(this);
+#endif
         try {
             L.pcall();
+#ifndef PCSX_METAL
             bool gotGLerror = false;
             for (const auto& error : m_glErrors) {
                 m_luaConsole.addError(error);
@@ -1951,6 +2040,7 @@ the update and manually apply it.)")));
             }
             m_glErrors.clear();
             if (gotGLerror) throw("OpenGL error while running Lua code");
+#endif
         } catch (...) {
             L.push("DrawImguiFrame");
             L.push();
@@ -1962,6 +2052,15 @@ the update and manually apply it.)")));
     m_notifier.draw();
 
     ImGui::Render();
+#ifdef PCSX_METAL
+    {
+        float r = m_fullWindowRender ? 0.0f : m_backgroundColor.x;
+        float g = m_fullWindowRender ? 0.0f : m_backgroundColor.y;
+        float b = m_fullWindowRender ? 0.0f : m_backgroundColor.z;
+        float a = m_fullWindowRender ? 1.0f : m_backgroundColor.w;
+        MetalUI::renderFrame(m_metalCtx, ImGui::GetDrawData(), r, g, b, a);
+    }
+#else
     glViewport(0, 0, w, h);
     if (m_fullWindowRender) {
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1972,6 +2071,13 @@ the update and manually apply it.)")));
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#endif
+#ifdef PCSX_METAL
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+        ImGui::UpdatePlatformWindows();
+        ImGui::RenderPlatformWindowsDefault();
+    }
+#else
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
     int winWidth, winHeight;
     int fbWidth, fbHeight;
@@ -2059,6 +2165,7 @@ the update and manually apply it.)")));
         glfwMakeContextCurrent(m_window);
     }
     glfwSwapBuffers(m_window);
+#endif
 
     L.getfieldtable("nvg", LUA_GLOBALSINDEX);
     L.push("_gui");
@@ -2133,6 +2240,13 @@ This is not recommended for normal use at the moment,
 as it is not fully implemented yet. It is recommended
 to use the software renderer instead. Requires a restart
 when changing this setting.)"));
+#ifdef PCSX_METAL
+        changed |=
+            ImGui::Checkbox(_("Metal GPU *ALPHA STATE*"), &settings.get<Emulator::SettingMetalRenderer>().value);
+        ImGuiHelpers::ShowHelpMarker(_(R"(Enables the Metal GPU renderer (macOS only).
+This is experimental and not fully implemented yet.
+Requires a restart when changing this setting.)"));
+#endif
 
         if (memChanged) {
             changed = true;
@@ -2408,10 +2522,12 @@ bool PCSX::GUI::about() {
     if (ImGui::Begin(_("About"), &m_showAbout)) {
         ImGui::TextUnformatted("PCSX-Redux");
         ImGui::Separator();
+#ifndef PCSX_METAL
         auto someString = [](const char* str, GLenum index) {
             const char* value = (const char*)glGetString(index);
             ImGui::TextWrapped("%s: %s", str, value);
         };
+#endif
         if (ImGui::BeginTabBar("AboutTabs", ImGuiTabBarFlags_None)) {
             if (ImGui::BeginTabItem(_("Version"))) {
                 auto& version = g_system->getVersion();
@@ -2474,6 +2590,7 @@ bool PCSX::GUI::about() {
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
+#ifndef PCSX_METAL
             if (ImGui::BeginTabItem(_("OpenGL information"))) {
                 if (m_reportGLErrors) {
                     ImGui::TextUnformatted(_("OpenGL error reporting: enabled"));
@@ -2518,6 +2635,7 @@ bool PCSX::GUI::about() {
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
+#endif
             if (ImGui::BeginTabItem(_("FFmpeg information"))) {
                 ImGui::Text(_("Version: %s"), av_version_info());
                 ImGui::Text(_("License: %s"), avutil_license());
@@ -2604,7 +2722,9 @@ bool PCSX::GUI::about() {
 }
 
 void PCSX::GUI::update(bool vsync) {
+#ifndef PCSX_METAL
     glDisable(GL_SCISSOR_TEST);
+#endif
     endFrame();
     startFrame();
     // At all times, either the emulated GPU core or the GUI have full control of the host GPU & the GL context
@@ -2799,6 +2919,11 @@ void PCSX::GUI::byteRateToString(float rate, std::string& str) {
     }
 }
 
+#ifdef PCSX_METAL
+void PCSX::GUI::drawBezierArrow(float, ImVec2, ImVec2, ImVec2, ImVec2, ImVec4, ImVec4) {
+    // NanoVG not available under Metal
+}
+#else
 void PCSX::GUI::drawBezierArrow(float width, ImVec2 start, ImVec2 c1, ImVec2 c2, ImVec2 end, ImVec4 innerColor,
                                 ImVec4 outerColor) {
     const float innerWidth = width;
@@ -2873,6 +2998,7 @@ void PCSX::GUI::drawBezierArrow(float width, ImVec2 start, ImVec2 c1, ImVec2 c2,
 
     nvgRestore(vg);
 }
+#endif  // !PCSX_METAL
 
 ImFont* PCSX::GUI::findClosestFont(const std::map<float, ImFont*>& fonts) {
     if (fonts.empty()) return ImGui::GetIO().Fonts[0].Fonts[0];
