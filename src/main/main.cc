@@ -321,6 +321,12 @@ int pcsxMain(int argc, char **argv) {
             emuSettings.get<PCSX::Emulator::SettingHardwareRenderer>() = false;
         }
 
+#ifdef PCSX_METAL
+        if (args.get<bool>("metalgpu")) {
+            emuSettings.get<PCSX::Emulator::SettingMetalRenderer>() = true;
+        }
+#endif
+
         if (args.get<bool>("kiosk")) {
             emuSettings.get<PCSX::Emulator::SettingKioskMode>() = true;
         }

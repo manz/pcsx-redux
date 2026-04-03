@@ -117,6 +117,9 @@ class GPU {
 
     static std::unique_ptr<GPU> getSoft();
     static std::unique_ptr<GPU> getOpenGL();
+#ifdef PCSX_METAL
+    static std::unique_ptr<GPU> getMetal();
+#endif
 
     enum class Ownership { BORROW, ACQUIRE };
     virtual Slice getVRAM(Ownership = Ownership::BORROW) = 0;

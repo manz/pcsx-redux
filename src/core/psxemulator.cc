@@ -146,7 +146,14 @@ int PCSX::Emulator::init() {
 
     const auto& args = g_system->getArgs();
 
-    m_gpu = settings.get<SettingHardwareRenderer>() ? GPU::getOpenGL() : GPU::getSoft();
+#ifdef PCSX_METAL
+    if (settings.get<SettingMetalRenderer>()) {
+        m_gpu = GPU::getMetal();
+    } else
+#endif
+    {
+        m_gpu = settings.get<SettingHardwareRenderer>() ? GPU::getOpenGL() : GPU::getSoft();
+    }
 
     setPGXPMode(m_config.PGXP_Mode);
     m_sio->init();

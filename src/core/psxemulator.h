@@ -178,6 +178,9 @@ class Emulator {
     typedef Setting<int, TYPESTRING("ReportGLErrorsSeverity"), 1> SettingGLErrorReportingSeverity;
     typedef Setting<bool, TYPESTRING("FullCaching"), false> SettingFullCaching;
     typedef Setting<bool, TYPESTRING("HardwareRenderer"), false> SettingHardwareRenderer;
+#ifdef PCSX_METAL
+    typedef Setting<bool, TYPESTRING("MetalRenderer"), false> SettingMetalRenderer;
+#endif
     typedef Setting<bool, TYPESTRING("ShownAutoUpdateConfig"), false> SettingShownAutoUpdateConfig;
     typedef Setting<bool, TYPESTRING("AutoUpdate"), false> SettingAutoUpdate;
     typedef Setting<int, TYPESTRING("MSAA"), 1> SettingMSAA;
@@ -199,7 +202,11 @@ class Emulator {
              SettingGLErrorReportingSeverity, SettingFullCaching, SettingHardwareRenderer, SettingShownAutoUpdateConfig,
              SettingAutoUpdate, SettingMSAA, SettingLinearFiltering, SettingKioskMode, SettingMcd1Pocketstation,
              SettingMcd2Pocketstation, SettingBiosBrowsePath, SettingEXP1Filepath, SettingEXP1BrowsePath,
-             SettingPIOConnected, SettingMapBrowsePath, SettingOpenDialogFavorites>
+             SettingPIOConnected, SettingMapBrowsePath, SettingOpenDialogFavorites
+#ifdef PCSX_METAL
+             , SettingMetalRenderer
+#endif
+             >
         settings;
     class PcsxConfig {
       public:
