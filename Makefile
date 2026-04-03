@@ -47,7 +47,10 @@ CPPFLAGS += -Ithird_party/zep/extensions
 CPPFLAGS += -Ithird_party/zep/include
 CPPFLAGS += -Ithird_party/xbyak/xbyak
 CPPFLAGS += -g
-CPPFLAGS += -DIMGUI_IMPL_OPENGL_LOADER_GL3W -DIMGUI_ENABLE_FREETYPE
+ifneq ($(PCSX_METAL),true)
+CPPFLAGS += -DIMGUI_IMPL_OPENGL_LOADER_GL3W
+endif
+CPPFLAGS += -DIMGUI_ENABLE_FREETYPE
 CPPFLAGS += -DZEP_FEATURE_CPP_FILE_SYSTEM
 CPPFLAGS += -DNVG_NO_STB
 CPPFLAGS += -DPB_STATIC_API
@@ -80,6 +83,10 @@ LUAJIT_LDFLAGS := $(LDFLAGS)
 ifeq ($(UNAME_S),Darwin)
     LDFLAGS += -lc++ -framework GLUT -framework OpenGL -framework CoreFoundation -framework Cocoa
     LDFLAGS += -mmacosx-version-min=10.15
+ifeq ($(PCSX_METAL),true)
+    CPPFLAGS += -DPCSX_METAL
+    LDFLAGS += -framework Metal -framework MetalKit -framework QuartzCore
+endif
 else
     LDFLAGS += -lstdc++fs
     LDFLAGS += -lGL -lX11 -lxcb
@@ -139,7 +146,7 @@ SRCS_lib_multipart += third_party/multipart-parser-c/multipart_parser.c
 SRCS += third_party/nanovg/src/nanovg.c
 SRCS_ReleaseWithTracy += third_party/tracy/public/TracyClient.cpp
 SRCS_lib_ucl += third_party/ucl/src/n2e_99.c third_party/ucl/src/alloc.c
-SRCS += $(wildcard third_party/uriparser/src/*.c)
+SRCS_pkg_liburiparser += $(wildcard third_party/uriparser/src/*.c)
 SRCS += third_party/zep/extensions/repl/mode_repl.cpp
 SRCS += $(wildcard third_party/zep/src/*.cpp)
 SRCS += third_party/zep/src/mcommon/animation/timer.cpp
@@ -147,6 +154,11 @@ SRCS += third_party/zep/src/mcommon/file/path.cpp
 SRCS += third_party/zep/src/mcommon/string/stringutils.cpp
 ifeq ($(UNAME_S),Darwin)
     SRCS += src/main/complain.mm third_party/clip/clip_osx.mm
+ifeq ($(PCSX_METAL),true)
+    SRCS += src/gpu/metal/gpu_metal.mm
+    SRCS += src/gui/gui_metal.mm
+    SRCS += third_party/imgui/backends/imgui_impl_metal.mm
+endif
 else
     SRCS += third_party/clip/clip_x11.cpp
 endif
@@ -303,7 +315,7 @@ objs/$(BUILD)/%.o: %.cpp
 
 objs/$(BUILD)/%.o: %.mm
 	@$(MKDIRP) $(dir $@)
-	$(CC) -c -o $@ $< $(CPPFLAGS) $(EXTRA_CPPFLAGS) $(CFLAGS)
+	$(CXX) -c -o $@ $< $(CPPFLAGS) $(EXTRA_CPPFLAGS) $(CXXFLAGS)
 
 deps/$(BUILD)/%.dep: third_party/luajit/src/luajit.h %.c
 	@$(MKDIRP) $(dir $@)
