@@ -157,6 +157,7 @@ ifeq ($(UNAME_S),Darwin)
 ifeq ($(PCSX_METAL),true)
     SRCS += src/gpu/metal/gpu_metal.mm
     SRCS += src/gui/gui_metal.mm
+    SRCS += src/gui/widgets/filedialog_metal.mm
     SRCS += third_party/imgui/backends/imgui_impl_metal.mm
 endif
 else

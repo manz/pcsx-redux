@@ -19,9 +19,20 @@
 
 #include "gui/widgets/filedialog.h"
 
+#ifndef PCSX_METAL
 #include "GL/gl3w.h"
+#endif
+
+#ifdef PCSX_METAL
+// Implemented in filedialog_metal.mm
+extern "C" void* metalCreateTexture(uint8_t* data, int w, int h, char fmt);
+extern "C" void metalDeleteTexture(void* tex);
+#endif
 
 void* PCSX::Widgets::FileDialogBase::CreateTexture(uint8_t* data, int w, int h, char fmt) {
+#ifdef PCSX_METAL
+    return metalCreateTexture(data, w, h, fmt);
+#else
     GLuint tex;
 
     glGenTextures(1, &tex);
@@ -35,12 +46,17 @@ void* PCSX::Widgets::FileDialogBase::CreateTexture(uint8_t* data, int w, int h, 
     glBindTexture(GL_TEXTURE_2D, 0);
 
     return (void*)tex;
+#endif
 }
 
 void PCSX::Widgets::FileDialogBase::setDeleteTexture() {
     DeleteTexture = [](void* tex) {
+#ifdef PCSX_METAL
+        metalDeleteTexture(tex);
+#else
         GLuint texID = reinterpret_cast<uintptr_t>(tex);
         glDeleteTextures(1, &texID);
+#endif
     };
 }
 
