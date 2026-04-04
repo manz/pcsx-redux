@@ -27,6 +27,7 @@ struct ImDrawData;
 namespace PCSX {
 namespace MetalUI {
 
+void* getDevice();
 void* init(GLFWwindow* window);
 void shutdown(void* ctx);
 void newFrame(void* ctx);

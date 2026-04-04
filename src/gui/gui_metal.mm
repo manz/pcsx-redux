@@ -33,6 +33,9 @@
 
 #include "gui/gui_metal.h"
 
+// Global device pointer for widgets that need to create Metal textures
+id<MTLDevice> g_metalDevice = nil;
+
 namespace PCSX {
 namespace MetalUI {
 
@@ -44,11 +47,14 @@ struct MetalContext {
     GLFWwindow* window = nullptr;
 };
 
+void* getDevice() { return (__bridge void*)g_metalDevice; }
+
 void* init(GLFWwindow* window) {
     auto* ctx = new MetalContext();
     ctx->window = window;
 
     ctx->device = MTLCreateSystemDefaultDevice();
+    g_metalDevice = ctx->device;
     ctx->commandQueue = [ctx->device newCommandQueue];
 
     NSWindow* nswin = glfwGetCocoaWindow(window);

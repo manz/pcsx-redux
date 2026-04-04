@@ -78,6 +78,7 @@ extern "C" {
 #endif
 #ifdef PCSX_METAL
 #include "gui/gui_metal.h"
+#include "gpu/metal/gpu_metal.h"
 #endif
 #include "imgui_internal.h"
 #include "imgui_stdlib.h"
@@ -975,7 +976,12 @@ void PCSX::GUI::saveCfg() {
 }
 
 void PCSX::GUI::glfwKeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+#ifndef PCSX_METAL
+    // Under Metal, ImGui_ImplGlfw_InitForOther installs its own key callback in the chain.
+    // Calling ImGui_ImplGlfw_KeyCallback here would create infinite recursion because
+    // ImGui's callback chains back to this trampoline.
     ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
+#endif
     g_system->m_eventBus->signal(Events::Keyboard{key, scancode, action, mods});
 }
 
@@ -1224,7 +1230,12 @@ void PCSX::GUI::endFrame() {
         ImGui::SetNextWindowDockID(dockspaceId);
     }
     if (m_fullWindowRender) {
+#ifdef PCSX_METAL
+        ImTextureID texture = reinterpret_cast<ImTextureID>(
+            static_cast<MetalGPU *>(g_emulator->m_gpu.get())->getDisplayTextureID());
+#else
         ImTextureID texture = m_offscreenTextures[m_currentTexture];
+#endif
         const auto basePos = ImGui::GetMainViewport()->Pos;
         const auto displayFramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
         const auto logicalRenderSize =
@@ -1243,7 +1254,15 @@ void PCSX::GUI::endFrame() {
             || true
 #endif
         ) {
+#ifdef PCSX_METAL
+            float mu0, mv0, mu1, mv1;
+            static_cast<MetalGPU *>(g_emulator->m_gpu.get())->getDisplayUVs(mu0, mv0, mu1, mv1);
+            ImVec2 uv0(mu0, mv0);
+            ImVec2 uv1(mu1, mv1);
+            ImGui::Image(texture, logicalRenderSize, uv0, uv1);
+#else
             ImGui::Image(texture, logicalRenderSize, ImVec2(0, 0), ImVec2(1, 1));
+#endif
         } else {
             m_outputShaderEditor.renderWithImgui(this, texture, m_renderSize, logicalRenderSize);
         }
@@ -1270,13 +1289,26 @@ void PCSX::GUI::endFrame() {
             }
             ImGuiHelpers::normalizeDimensions(textureSize, renderRatio);
             ImGui::SetCursorPos(ImGui::GetCursorPos() + (contentRegion - textureSize) * 0.5f);
+#ifdef PCSX_METAL
+            ImTextureID texture = reinterpret_cast<ImTextureID>(
+                static_cast<MetalGPU *>(g_emulator->m_gpu.get())->getDisplayTextureID());
+#else
             ImTextureID texture = m_offscreenTextures[m_currentTexture];
+#endif
             if (g_system->getArgs().isShadersDisabled()
 #ifdef PCSX_METAL
                 || true
 #endif
             ) {
+#ifdef PCSX_METAL
+                float mu0, mv0, mu1, mv1;
+                static_cast<MetalGPU *>(g_emulator->m_gpu.get())->getDisplayUVs(mu0, mv0, mu1, mv1);
+                ImVec2 uv0(mu0, mv0);
+                ImVec2 uv1(mu1, mv1);
+                ImGui::Image(texture, textureSize, uv0, uv1);
+#else
                 ImGui::Image(texture, textureSize, ImVec2(0, 0), ImVec2(1, 1));
+#endif
             } else {
                 m_outputShaderEditor.renderWithImgui(this, texture, m_renderSize, textureSize);
             }
