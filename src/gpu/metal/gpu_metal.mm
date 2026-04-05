@@ -65,7 +65,9 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
     float x = float(in.position.x);
     float y = float(in.position.y);
     float xx = (x + u.drawOffset.x) / 512.0 - 1.0;
-    float yy = (y + u.drawOffset.y) / 256.0 - 1.0;
+    // Metal clip Y is inverted vs OpenGL: +1 = top in clip, but PSX Y=0 = top.
+    // Negate Y so PSX coordinates map correctly to the render target.
+    float yy = -((y + u.drawOffset.y) / 256.0 - 1.0);
 
     float red   = float(in.color & 0xffu);
     float green = float((in.color >> 8u) & 0xffu);
@@ -170,6 +172,7 @@ struct PCSX::MetalGPU::MetalObjects {
     id<MTLTexture>              vramRenderTarget = nil;   // render target (1024x512 RGBA8)
     id<MTLTexture>              vramSampleTexture = nil;  // read by fragment shader
     id<MTLTexture>              displayTexture = nil;     // decoded display output (for 24-bit mode)
+    id<MTLTexture>              displaySnapshot = nil;    // snapshot of VRAM for ImGui to sample
     id<MTLBuffer>               vertexBuffer = nil;       // streaming vertex data
     id<MTLRenderPipelineState>  psoOpaque = nil;          // blending disabled
     id<MTLRenderPipelineState>  psoBlendAdd = nil;        // dual-source, equation = add
@@ -212,6 +215,43 @@ static id<MTLRenderPipelineState> makePSO(id<MTLDevice> device,
 }
 
 // ---------------------------------------------------------------------------
+// Per-frame GPU command log
+// ---------------------------------------------------------------------------
+static struct {
+    int polysUntex = 0, polysTex = 0;
+    int lines = 0;
+    int rectsUntex = 0, rectsTex = 0;
+    int fastFills = 0;
+    int blitVV = 0;
+    int cpuUploads = 0;
+    int totalVerts = 0;
+    int batches = 0;
+    int frameNum = 0;
+    int scissorX = 0, scissorY = 0, scissorW = 0, scissorH = 0;
+    bool enabled = false;  // set to true to enable periodic GPU command logging
+    int logInterval = 120;
+
+    void reset() {
+        polysUntex = polysTex = lines = rectsUntex = rectsTex = 0;
+        fastFills = blitVV = cpuUploads = totalVerts = batches = 0;
+    }
+    void dump(PCSX::GPU::Display &disp) {
+        frameNum++;
+        if (!enabled || (frameNum % logInterval != 0)) { reset(); return; }
+        fprintf(stderr, "[GPU f%d] en=%d d=%d start=(%d,%d) sz=(%d,%d) | "
+                "poly:%d/%d line:%d rect:%d/%d fill:%d blit:%d upload:%d | "
+                "verts=%d batches=%d | scissor=(%d,%d,%d,%d)\n",
+                frameNum, disp.enabled, disp.info.depth,
+                disp.start.x(), disp.start.y(), disp.size.x(), disp.size.y(),
+                polysUntex, polysTex, lines, rectsUntex, rectsTex,
+                fastFills, blitVV, cpuUploads,
+                totalVerts, batches,
+                (int)scissorX, (int)scissorY, (int)scissorW, (int)scissorH);
+        reset();
+    }
+} s_log;
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 std::unique_ptr<PCSX::GPU> PCSX::GPU::getMetal() { return std::make_unique<PCSX::MetalGPU>(); }
@@ -234,7 +274,7 @@ int PCSX::MetalGPU::initBackend(UI *) {
                                                                      height:c_vramHeight
                                                                   mipmapped:NO];
     texDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-    texDesc.storageMode = MTLStorageModePrivate;
+    texDesc.storageMode = MTLStorageModeShared;
     m_mtl->vramRenderTarget = [m_mtl->device newTextureWithDescriptor:texDesc];
 
     texDesc.usage = MTLTextureUsageShaderRead;
@@ -248,6 +288,16 @@ int PCSX::MetalGPU::initBackend(UI *) {
     displayDesc.usage = MTLTextureUsageShaderRead;
     displayDesc.storageMode = MTLStorageModeShared;
     m_mtl->displayTexture = [m_mtl->device newTextureWithDescriptor:displayDesc];
+
+    // Snapshot texture — a stable copy of the display region for ImGui to sample.
+    // Managed storage lets the GPU blit into it and ImGui sample from it without races.
+    auto *snapDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                       width:c_vramWidth
+                                                                      height:c_vramHeight
+                                                                   mipmapped:NO];
+    snapDesc.usage = MTLTextureUsageShaderRead;
+    snapDesc.storageMode = MTLStorageModeShared;
+    m_mtl->displaySnapshot = [m_mtl->device newTextureWithDescriptor:snapDesc];
 
     // --- Vertex buffer (shared for CPU writes + GPU reads) ---
     m_mtl->vertexBuffer = [m_mtl->device newBufferWithLength:c_vertexBufferSize * sizeof(Vertex)
@@ -400,6 +450,15 @@ void PCSX::MetalGPU::renderBatch() {
         drawOnce(pso);
     }
 
+    s_log.totalVerts += m_vertexCount;
+    s_log.batches++;
+    // Log first batch's vertex positions once per log interval
+    if (s_log.batches == 1 && (s_log.frameNum % s_log.logInterval) >= s_log.logInterval - 1) {
+        int n = std::min(m_vertexCount, 6);
+        fprintf(stderr, "  [batch] offset=(%.1f,%.1f) verts=%d first%d:", m_uniforms.drawOffsetX, m_uniforms.drawOffsetY, m_vertexCount, n);
+        for (int i = 0; i < n; i++) fprintf(stderr, " (%d,%d tp=%04x cl=%04x)", m_vertices[i].x, m_vertices[i].y, m_vertices[i].texpage, m_vertices[i].clut);
+        fprintf(stderr, "\n");
+    }
     m_syncVRAM = true;  // next batch must re-sync sample texture
     m_vertexCount = 0;
 }
@@ -516,6 +575,7 @@ void PCSX::MetalGPU::updateDrawArea() {
     if (width < 0) width = 0;
     if (height < 0) height = 0;
     m_mtl->scissor = {(NSUInteger)left, (NSUInteger)top, (NSUInteger)width, (NSUInteger)height};
+    s_log.scissorX = left; s_log.scissorY = top; s_log.scissorW = width; s_log.scissorH = height;
 }
 
 void PCSX::MetalGPU::setDrawOffset(uint32_t cmd) {
@@ -552,6 +612,7 @@ uint32_t PCSX::MetalGPU::readStatusInternal() { return m_gpustat; }
 void PCSX::MetalGPU::write0(ClearCache *) {}
 
 void PCSX::MetalGPU::write0(FastFill *cmd) {
+    s_log.fastFills++;
     renderBatch();
     if (!m_mtl || cmd->w == 0 || cmd->h == 0) return;
 
@@ -610,6 +671,7 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
 template <PCSX::GPU::Shading shading, PCSX::GPU::Shape shape, PCSX::GPU::Textured textured,
           PCSX::GPU::Blend blend, PCSX::GPU::Modulation modulation>
 void PCSX::MetalGPU::polyExec(Poly<shading, shape, textured, blend, modulation> *prim) {
+    if constexpr (textured == Textured::Yes) s_log.polysTex++; else s_log.polysUntex++;
     if constexpr (blend == Blend::Off) setTransparency<Transparency::Opaque>();
     else setTransparency<Transparency::Transparent>();
 
@@ -643,6 +705,7 @@ POLY_STUB(Gouraud,Quad,Yes,Off,Off)POLY_STUB(Gouraud,Quad,Yes,Off,On)POLY_STUB(G
 // --- Lines ------------------------------------------------------------------
 template <PCSX::GPU::Shading shading, PCSX::GPU::LineType lineType, PCSX::GPU::Blend blend>
 void PCSX::MetalGPU::lineExec(Line<shading, lineType, blend> *prim) {
+    s_log.lines++;
     if constexpr (blend == Blend::Off) setTransparency<Transparency::Opaque>();
     else setTransparency<Transparency::Transparent>();
 
@@ -662,6 +725,7 @@ LINE_STUB(Gouraud,Simple,Off) LINE_STUB(Gouraud,Simple,Semi) LINE_STUB(Gouraud,P
 template <PCSX::GPU::Size size, PCSX::GPU::Textured textured,
           PCSX::GPU::Blend blend, PCSX::GPU::Modulation modulation>
 void PCSX::MetalGPU::rectExec(Rect<size, textured, blend, modulation> *prim) {
+    if constexpr (textured == Textured::Yes) s_log.rectsTex++; else s_log.rectsUntex++;
     if constexpr (blend == Blend::Off) setTransparency<Transparency::Opaque>();
     else {
         setTransparency<Transparency::Transparent>();
@@ -691,6 +755,7 @@ RECT_STUB(S16,No,Off,On) RECT_STUB(S16,No,Semi,On) RECT_STUB(S16,Yes,Off,On) REC
 
 // --- VRAM blits -------------------------------------------------------------
 void PCSX::MetalGPU::write0(BlitVramVram *cmd) {
+    s_log.blitVV++;
     renderBatch();
     if (!m_mtl || cmd->w == 0 || cmd->h == 0) return;
 
@@ -740,77 +805,94 @@ void PCSX::MetalGPU::write1(CtrlDisplayMode *cmd) { m_display.set(cmd); }
 // ---------------------------------------------------------------------------
 void* PCSX::MetalGPU::getDisplayTextureID() {
     if (!m_mtl) return nullptr;
-    if (m_mtl->display24bit) return (__bridge void*)m_mtl->displayTexture;
-    return (__bridge void*)m_mtl->vramRenderTarget;
+    // Always return displayTexture — it gets populated every vblank
+    // either from 24-bit decode or from a readback of the render target.
+    return (__bridge void*)m_mtl->displayTexture;
 }
 
 void PCSX::MetalGPU::getDisplayUVs(float &u0, float &v0, float &u1, float &v1) {
     if (m_mtl && m_mtl->display24bit) {
-        // 24-bit decode writes only the display region into the texture
         u0 = 0.0f; v0 = 0.0f;
         u1 = float(m_display.size.x()) / float(c_vramWidth);
         v1 = float(m_display.size.y()) / float(c_vramHeight);
     } else {
-        u0 = m_display.startNormalized.x();
-        v0 = m_display.startNormalized.y();
-        u1 = u0 + m_display.sizeNormalized.x();
-        v1 = v0 + m_display.sizeNormalized.y();
+        // Use raw start/size integers to compute UVs directly,
+        // avoiding potential issues with startNormalized not being updated.
+        u0 = float(m_display.start.x()) / float(c_vramWidth);
+        v0 = float(m_display.start.y()) / float(c_vramHeight);
+        u1 = u0 + float(m_display.size.x()) / float(c_vramWidth);
+        v1 = v0 + float(m_display.size.y()) / float(c_vramHeight);
     }
 }
 
 void PCSX::MetalGPU::vblank(bool fromGui) {
     renderBatch();
+    s_log.dump(m_display);
     if (!m_mtl) return;
 
-    m_mtl->display24bit = (m_display.info.depth == CtrlDisplayMode::CD_24BITS);
-    if (!m_mtl->display24bit || !m_display.enabled) return;
+    m_mtl->display24bit = m_display.enabled && (m_display.info.depth == CtrlDisplayMode::CD_24BITS);
 
-    // --- 24-bit display decode from raw 16-bit VRAM mirror ---
-    // The PSX packs 24-bit RGB pixels as raw bytes across 16-bit VRAM words:
-    //   word0: byte0|byte1  word1: byte2|byte3  word2: byte4|byte5
-    //   pixel0 = (byte0, byte1, byte2)  pixel1 = (byte3, byte4, byte5)
-    int dispX = m_display.start.x();
-    int dispY = m_display.start.y();
-    int dispW = m_display.size.x();
-    int dispH = m_display.size.y();
-    if (dispW <= 0 || dispH <= 0) return;
-    if (dispW > c_vramWidth) dispW = c_vramWidth;
-    if (dispH > c_vramHeight) dispH = c_vramHeight;
+    if (m_mtl->display24bit) {
+        // --- 24-bit display decode from raw 16-bit VRAM mirror ---
+        int dispX = m_display.start.x();
+        int dispY = m_display.start.y();
+        int dispW = m_display.size.x();
+        int dispH = m_display.size.y();
+        if (dispW <= 0 || dispH <= 0) return;
+        if (dispW > c_vramWidth) dispW = c_vramWidth;
+        if (dispH > c_vramHeight) dispH = c_vramHeight;
 
-    std::vector<uint32_t> decoded(dispW * dispH);
-    for (int y = 0; y < dispH; y++) {
-        int srcY = (dispY + y) & 511;
-        for (int x = 0; x < dispW; x++) {
-            int byteOff = x * 3;
-            int wordIdx = byteOff / 2;
-            int byteInWord = byteOff & 1;
-            int srcX = (dispX + wordIdx) & 1023;
-            int srcX1 = (srcX + 1) & 1023;
+        std::vector<uint32_t> decoded(dispW * dispH);
+        for (int y = 0; y < dispH; y++) {
+            int srcY = (dispY + y) & 511;
+            for (int x = 0; x < dispW; x++) {
+                int byteOff = x * 3;
+                int wordIdx = byteOff / 2;
+                int byteInWord = byteOff & 1;
+                int srcX = (dispX + wordIdx) & 1023;
+                int srcX1 = (srcX + 1) & 1023;
 
-            uint16_t w0 = m_vram16[srcY * c_vramWidth + srcX];
-            uint16_t w1 = m_vram16[srcY * c_vramWidth + srcX1];
+                uint16_t w0 = m_vram16[srcY * c_vramWidth + srcX];
+                uint16_t w1 = m_vram16[srcY * c_vramWidth + srcX1];
 
-            uint8_t rb, gb, bb;
-            if (byteInWord == 0) {
-                rb = w0 & 0xff;
-                gb = (w0 >> 8) & 0xff;
-                bb = w1 & 0xff;
-            } else {
-                rb = (w0 >> 8) & 0xff;
-                gb = w1 & 0xff;
-                bb = (w1 >> 8) & 0xff;
+                uint8_t rb, gb, bb;
+                if (byteInWord == 0) {
+                    rb = w0 & 0xff;
+                    gb = (w0 >> 8) & 0xff;
+                    bb = w1 & 0xff;
+                } else {
+                    rb = (w0 >> 8) & 0xff;
+                    gb = w1 & 0xff;
+                    bb = (w1 >> 8) & 0xff;
+                }
+                decoded[y * dispW + x] = rb | (gb << 8) | (bb << 16) | 0xff000000u;
             }
-
-            decoded[y * dispW + x] = rb | (gb << 8) | (bb << 16) | 0xff000000u;
         }
+        [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, dispW, dispH)
+                                 mipmapLevel:0
+                                   withBytes:decoded.data()
+                                 bytesPerRow:dispW * 4];
+    } else {
+        // Read back VRAM render target to CPU buffer, upload to displayTexture.
+        // This matches the software GPU pattern: CPU buffer → shared texture → ImGui.
+        constexpr size_t vramBytes = c_vramWidth * c_vramHeight * 4;
+        auto *staging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
+        auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
+        auto *blit = [cmdBuf blitCommandEncoder];
+        [blit copyFromTexture:m_mtl->vramRenderTarget sourceSlice:0 sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(c_vramWidth, c_vramHeight, 1)
+                   toBuffer:staging destinationOffset:0 destinationBytesPerRow:c_vramWidth * 4
+          destinationBytesPerImage:vramBytes];
+        [blit endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+
+        [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, c_vramWidth, c_vramHeight)
+                                 mipmapLevel:0
+                                   withBytes:staging.contents
+                                 bytesPerRow:c_vramWidth * 4];
     }
-
-    [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, dispW, dispH)
-                             mipmapLevel:0
-                               withBytes:decoded.data()
-                             bytesPerRow:dispW * 4];
 }
-
 
 
 // ---------------------------------------------------------------------------
@@ -873,7 +955,7 @@ PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {
     auto *out16 = new uint16_t[pixCount];
     for (size_t i = 0; i < pixCount; i++) {
         uint8_t r = rgba[i * 4 + 0], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
-        out16[i] = ((r >> 3) & 0x1f) | (((g >> 3) & 0x1f) << 5) | (((b >> 3) & 0x1f) << 10) | ((a >> 7) << 15);
+        out16[i] = ((r * 31 + 127) / 255) | (((g * 31 + 127) / 255) << 5) | (((b * 31 + 127) / 255) << 10) | ((a >> 7) << 15);
     }
 
     Slice slice;
@@ -883,6 +965,7 @@ PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {
 }
 
 void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_t *pixels, PartialUpdateVram) {
+    s_log.cpuUploads++;
     if (!m_mtl || w <= 0 || h <= 0) return;
     renderBatch();
 
@@ -900,9 +983,11 @@ void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_
     for (int row = 0; row < h; row++) {
         for (int col = 0; col < w; col++) {
             uint16_t px = pixels[row * w + col];
-            uint8_t r = ((px >>  0) & 0x1f) << 3;
-            uint8_t g = ((px >>  5) & 0x1f) << 3;
-            uint8_t b = ((px >> 10) & 0x1f) << 3;
+            // Use val * 255 / 31 to match GL_UNSIGNED_SHORT_1_5_5_5_REV behavior.
+            // This ensures the shader's floatToU5() reconstructs the original 5-bit value.
+            uint8_t r = ((px >>  0) & 0x1f) * 255 / 31;
+            uint8_t g = ((px >>  5) & 0x1f) * 255 / 31;
+            uint8_t b = ((px >> 10) & 0x1f) * 255 / 31;
             uint8_t a = (px & 0x8000) ? 0xff : 0x00;
             rgba[row * w + col] = r | (g << 8) | (b << 16) | (a << 24);
         }
