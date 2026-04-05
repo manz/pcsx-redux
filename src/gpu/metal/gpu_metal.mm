@@ -65,9 +65,9 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
     float x = float(in.position.x);
     float y = float(in.position.y);
     float xx = (x + u.drawOffset.x) / 512.0 - 1.0;
-    // Metal clip Y is inverted vs OpenGL: +1 = top in clip, but PSX Y=0 = top.
-    // Negate Y so PSX coordinates map correctly to the render target.
-    float yy = -((y + u.drawOffset.y) / 256.0 - 1.0);
+    // Negate Y so PSX Y=0 (top of screen) maps to Metal texture row 0 (top).
+    // Without this, Y=0 maps to clip -1 which is the bottom row in Metal.
+    float yy = 1.0 - (y + u.drawOffset.y) / 256.0;
 
     float red   = float(in.color & 0xffu);
     float green = float((in.color >> 8u) & 0xffu);
