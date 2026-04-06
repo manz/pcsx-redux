@@ -52,10 +52,14 @@ struct VertexOut {
 };
 
 struct Uniforms {
-    float2 drawOffset;
-    int4   texWindow;       // xy = mask, zw = offset
-    float4 blendFactors;
-    float4 blendFactorsIfOpaque;
+    float drawOffsetX;
+    float drawOffsetY;
+    int texWindowMaskX;
+    int texWindowMaskY;
+    int texWindowOffX;
+    int texWindowOffY;
+    float blendR, blendG, blendB, blendA;
+    float blendOpaqueR, blendOpaqueG, blendOpaqueB, blendOpaqueA;
 };
 
 vertex VertexOut vertexMain(VertexIn in [[stage_in]],
@@ -64,10 +68,10 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
 
     float x = float(in.position.x);
     float y = float(in.position.y);
-    float xx = (x + u.drawOffset.x) / 512.0 - 1.0;
+    float xx = (x + u.drawOffsetX) / 512.0 - 1.0;
     // Metal NDC Y+ is down (top-left origin). Divide by -256 so VRAM Y=0
     // maps to clip +1 (top) and Y=511 maps to clip -1 (bottom).
-    float yy = (y + u.drawOffset.y) / -256.0 + 1.0;
+    float yy = (y + u.drawOffsetY) / -256.0 + 1.0;
 
     float red   = float(in.color & 0xffu);
     float green = float((in.color >> 8u) & 0xffu);
@@ -89,20 +93,19 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
 
 // --- helpers ----------------------------------------------------------------
 
-static int floatToU5(float f) { return int(floor(f * 31.0 + 0.5)); }
-
-static float4 sampleVRAM(texture2d<float, access::read> tex, int2 c) {
+// Read raw 16-bit value from R16Uint VRAM texture
+static uint readVRAM16(texture2d<uint, access::read> tex, int2 c) {
     c &= int2(1023, 511);
-    return tex.read(uint2(c));
+    return tex.read(uint2(c)).r;
 }
 
-static int sample16(texture2d<float, access::read> tex, int2 c) {
-    float4 col = sampleVRAM(tex, c);
-    int r = floatToU5(col.r);
-    int g = floatToU5(col.g);
-    int b = floatToU5(col.b);
-    int msb = int(ceil(col.a)) << 15;
-    return r | (g << 5) | (b << 10) | msb;
+// Convert raw 16-bit PSX color (5:5:5:1) to float4 RGBA
+static float4 color16toFloat4(uint raw) {
+    float r = float(raw & 0x1fu) / 31.0;
+    float g = float((raw >> 5u) & 0x1fu) / 31.0;
+    float b = float((raw >> 10u) & 0x1fu) / 31.0;
+    float a = float((raw >> 15u) & 1u);
+    return float4(r, g, b, a);
 }
 
 static float4 texBlend(float4 c1, float4 c2) {
@@ -119,45 +122,48 @@ struct FragmentOut {
 };
 
 fragment FragmentOut fragmentMain(VertexOut in [[stage_in]],
-                                  texture2d<float, access::read> vramTex [[texture(0)]],
+                                  texture2d<uint, access::read> vramTex [[texture(0)]],
                                   constant Uniforms &u [[buffer(1)]]) {
     FragmentOut out;
 
     if (in.texMode == 4) {
         out.color      = in.vertexColor;
-        out.blendColor = u.blendFactors;
+        out.blendColor = float4(u.blendR, u.blendG, u.blendB, u.blendA);
         return out;
     }
 
     int2 UV = int2(floor(in.texCoords + float2(0.0001))) & int2(0xff);
-    UV = (UV & u.texWindow.xy) | u.texWindow.zw;
+    UV = (UV & int2(u.texWindowMaskX, u.texWindowMaskY)) | int2(u.texWindowOffX, u.texWindowOffY);
 
     if (in.texMode == 0) {  // 4bpp
         int2 tc = int2(UV.x >> 2, UV.y) + in.texpageBase;
-        int s = sample16(vramTex, tc);
+        uint word = readVRAM16(vramTex, tc);
         int shift = (UV.x & 3) << 2;
-        int idx = (s >> shift) & 0xf;
-        int2 sc = int2(in.clutBase.x + idx, in.clutBase.y);
-        out.color = vramTex.read(uint2(sc & int2(1023, 511)));
+        int idx = (word >> shift) & 0xf;
+        uint clutWord = readVRAM16(vramTex, int2(in.clutBase.x + idx, in.clutBase.y));
+        out.color = color16toFloat4(clutWord);
         if (all(out.color.rgb == float3(0.0))) discard_fragment();
-        out.blendColor = out.color.a >= 0.5 ? u.blendFactors : u.blendFactorsIfOpaque;
+        out.blendColor = out.color.a >= 0.5 ? float4(u.blendR, u.blendG, u.blendB, u.blendA)
+                                           : float4(u.blendOpaqueR, u.blendOpaqueG, u.blendOpaqueB, u.blendOpaqueA);
         out.color = texBlend(out.color, in.vertexColor);
     } else if (in.texMode == 1) {  // 8bpp
         int2 tc = int2(UV.x >> 1, UV.y) + in.texpageBase;
-        int s = sample16(vramTex, tc);
+        uint word = readVRAM16(vramTex, tc);
         int shift = (UV.x & 1) << 3;
-        int idx = (s >> shift) & 0xff;
-        int2 sc = int2(in.clutBase.x + idx, in.clutBase.y);
-        out.color = vramTex.read(uint2(sc & int2(1023, 511)));
+        int idx = (word >> shift) & 0xff;
+        uint clutWord = readVRAM16(vramTex, int2(in.clutBase.x + idx, in.clutBase.y));
+        out.color = color16toFloat4(clutWord);
         if (all(out.color.rgb == float3(0.0))) discard_fragment();
-        out.blendColor = out.color.a >= 0.5 ? u.blendFactors : u.blendFactorsIfOpaque;
+        out.blendColor = out.color.a >= 0.5 ? float4(u.blendR, u.blendG, u.blendB, u.blendA)
+                                           : float4(u.blendOpaqueR, u.blendOpaqueG, u.blendOpaqueB, u.blendOpaqueA);
         out.color = texBlend(out.color, in.vertexColor);
     } else {  // 16bpp (modes 2 and 3)
         int2 tc = UV + in.texpageBase;
-        out.color = sampleVRAM(vramTex, tc);
+        uint word = readVRAM16(vramTex, tc);
+        out.color = color16toFloat4(word);
         if (all(out.color.rgb == float3(0.0))) discard_fragment();
         out.color = texBlend(out.color, in.vertexColor);
-        out.blendColor = u.blendFactors;
+        out.blendColor = float4(u.blendR, u.blendG, u.blendB, u.blendA);
     }
     return out;
 }
@@ -277,8 +283,15 @@ int PCSX::MetalGPU::initBackend(UI *) {
     texDesc.storageMode = MTLStorageModeShared;
     m_mtl->vramRenderTarget = [m_mtl->device newTextureWithDescriptor:texDesc];
 
-    texDesc.usage = MTLTextureUsageShaderRead;
-    m_mtl->vramSampleTexture = [m_mtl->device newTextureWithDescriptor:texDesc];
+    // Sample texture: R16Uint stores raw 16-bit PSX pixels.
+    // No float conversion — the shader reads uint and extracts bytes/nibbles directly.
+    auto *sampleDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Uint
+                                                                         width:c_vramWidth
+                                                                        height:c_vramHeight
+                                                                     mipmapped:NO];
+    sampleDesc.usage = MTLTextureUsageShaderRead;
+    sampleDesc.storageMode = MTLStorageModeShared;
+    m_mtl->vramSampleTexture = [m_mtl->device newTextureWithDescriptor:sampleDesc];
 
     // Display texture for 24-bit decode (shared storage so CPU can write)
     auto *displayDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -373,18 +386,34 @@ int PCSX::MetalGPU::shutdown() {
 void PCSX::MetalGPU::syncVRAMTexture() {
     if (!m_syncVRAM || !m_mtl) return;
     m_syncVRAM = false;
+
+    // Read RGBA8 render target back to CPU, convert to raw 16-bit, upload to R16Uint sample texture.
+    constexpr size_t vramBytes = c_vramWidth * c_vramHeight * 4;
+    auto *staging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
     auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
     auto *blit = [cmdBuf blitCommandEncoder];
-    [blit copyFromTexture:m_mtl->vramRenderTarget
-              sourceSlice:0 sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(c_vramWidth, c_vramHeight, 1)
-                toTexture:m_mtl->vramSampleTexture
-         destinationSlice:0 destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit copyFromTexture:m_mtl->vramRenderTarget sourceSlice:0 sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(c_vramWidth, c_vramHeight, 1)
+               toBuffer:staging destinationOffset:0 destinationBytesPerRow:c_vramWidth * 4
+      destinationBytesPerImage:vramBytes];
     [blit endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+
+    // Convert RGBA8 → raw 16-bit (5:5:5:1)
+    auto *rgba = (const uint8_t *)staging.contents;
+    constexpr size_t pixCount = c_vramWidth * c_vramHeight;
+    std::vector<uint16_t> raw16(pixCount);
+    for (size_t i = 0; i < pixCount; i++) {
+        uint8_t r = rgba[i * 4 + 0], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
+        raw16[i] = ((r * 31 + 127) / 255) | (((g * 31 + 127) / 255) << 5) |
+                   (((b * 31 + 127) / 255) << 10) | ((a >> 7) << 15);
+    }
+
+    [m_mtl->vramSampleTexture replaceRegion:MTLRegionMake2D(0, 0, c_vramWidth, c_vramHeight)
+                                mipmapLevel:0
+                                  withBytes:raw16.data()
+                                bytesPerRow:c_vramWidth * sizeof(uint16_t)];
 }
 
 // ---------------------------------------------------------------------------
@@ -981,25 +1010,24 @@ void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_
         }
     }
 
-    // Convert 16-bit (1555 ABGR) → RGBA8 and upload to Metal texture
-    std::vector<uint32_t> rgba(w * h);
-    for (int row = 0; row < h; row++) {
-        for (int col = 0; col < w; col++) {
-            uint16_t px = pixels[row * w + col];
-            // Use val * 255 / 31 to match GL_UNSIGNED_SHORT_1_5_5_5_REV behavior.
-            // This ensures the shader's floatToU5() reconstructs the original 5-bit value.
-            uint8_t r = ((px >>  0) & 0x1f) * 255 / 31;
-            uint8_t g = ((px >>  5) & 0x1f) * 255 / 31;
-            uint8_t b = ((px >> 10) & 0x1f) * 255 / 31;
-            uint8_t a = (px & 0x8000) ? 0xff : 0x00;
-            rgba[row * w + col] = r | (g << 8) | (b << 16) | (a << 24);
-        }
-    }
+    // Upload raw 16-bit directly to sample texture (R16Uint) — no conversion!
+    [m_mtl->vramSampleTexture replaceRegion:MTLRegionMake2D(x, y, w, h)
+                                mipmapLevel:0
+                                  withBytes:pixels
+                                bytesPerRow:w * sizeof(uint16_t)];
 
-    // Upload via staging buffer + blit
+    // Also upload RGBA8 version to render target (for display readback)
+    std::vector<uint32_t> rgba(w * h);
+    for (int i = 0; i < w * h; i++) {
+        uint16_t px = pixels[i];
+        uint8_t r = ((px >>  0) & 0x1f) * 255 / 31;
+        uint8_t g = ((px >>  5) & 0x1f) * 255 / 31;
+        uint8_t b = ((px >> 10) & 0x1f) * 255 / 31;
+        uint8_t a = (px & 0x8000) ? 0xff : 0x00;
+        rgba[i] = r | (g << 8) | (b << 16) | (a << 24);
+    }
     size_t byteSize = rgba.size() * 4;
     auto *staging = [m_mtl->device newBufferWithBytes:rgba.data() length:byteSize options:MTLResourceStorageModeShared];
-
     auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
     auto *blit = [cmdBuf blitCommandEncoder];
     [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:w * 4 sourceBytesPerImage:byteSize
