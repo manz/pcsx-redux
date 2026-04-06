@@ -65,9 +65,9 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
     float x = float(in.position.x);
     float y = float(in.position.y);
     float xx = (x + u.drawOffset.x) / 512.0 - 1.0;
-    // No Y flip in shader — viewport flip handles Metal's inverted Y.
-    // Everything stays in PSX coordinates.
-    float yy = (y + u.drawOffset.y) / 256.0 - 1.0;
+    // Metal NDC Y+ is down (top-left origin). Divide by -256 so VRAM Y=0
+    // maps to clip +1 (top) and Y=511 maps to clip -1 (bottom).
+    float yy = (y + u.drawOffset.y) / -256.0 + 1.0;
 
     float red   = float(in.color & 0xffu);
     float green = float((in.color >> 8u) & 0xffu);
@@ -420,10 +420,6 @@ void PCSX::MetalGPU::renderBatch() {
         auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
         auto *enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
         [enc setRenderPipelineState:pipeline];
-        // Flip viewport Y so PSX Y=0 maps to texture row 0 (top).
-        // Everything thinks in PSX coordinates — no flipping anywhere else.
-        MTLViewport vp = {0, (double)c_vramHeight, (double)c_vramWidth, -(double)c_vramHeight, 0, 1};
-        [enc setViewport:vp];
         [enc setVertexBuffer:m_mtl->vertexBuffer offset:0 atIndex:0];
         [enc setVertexBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
         [enc setFragmentBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
@@ -637,8 +633,6 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
     auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
     auto *enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
     [enc setRenderPipelineState:m_mtl->psoOpaque];
-    MTLViewport fillVP = {0, (double)c_vramHeight, (double)c_vramWidth, -(double)c_vramHeight, 0, 1};
-    [enc setViewport:fillVP];
 
     // Draw a solid-color quad covering the fill region
     Vertex fillVerts[6];
