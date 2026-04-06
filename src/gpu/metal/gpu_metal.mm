@@ -126,44 +126,51 @@ fragment FragmentOut fragmentMain(VertexOut in [[stage_in]],
                                   constant Uniforms &u [[buffer(1)]]) {
     FragmentOut out;
 
+    // Untextured primitive
     if (in.texMode == 4) {
-        out.color      = in.vertexColor;
-        out.blendColor = float4(u.blendR, u.blendG, u.blendB, u.blendA);
+        // Premultiply by src factor (blendR = src_alpha_factor for all channels)
+        out.color = float4(in.vertexColor.rgb * u.blendR, 1.0);
+        // Destination weight in alpha of second output
+        out.blendColor = float4(0.0, 0.0, 0.0, u.blendA);
         return out;
     }
 
     int2 UV = int2(floor(in.texCoords + float2(0.0001))) & int2(0xff);
     UV = (UV & int2(u.texWindowMaskX, u.texWindowMaskY)) | int2(u.texWindowOffX, u.texWindowOffY);
 
+    // Sample texture and look up CLUT
+    float4 texColor;
     if (in.texMode == 0) {  // 4bpp
         int2 tc = int2(UV.x >> 2, UV.y) + in.texpageBase;
         uint word = readVRAM16(vramTex, tc);
-        int shift = (UV.x & 3) << 2;
-        int idx = (word >> shift) & 0xf;
-        uint clutWord = readVRAM16(vramTex, int2(in.clutBase.x + idx, in.clutBase.y));
-        out.color = color16toFloat4(clutWord);
-        if (all(out.color.rgb == float3(0.0))) discard_fragment();
-        out.blendColor = out.color.a >= 0.5 ? float4(u.blendR, u.blendG, u.blendB, u.blendA)
-                                           : float4(u.blendOpaqueR, u.blendOpaqueG, u.blendOpaqueB, u.blendOpaqueA);
-        out.color = texBlend(out.color, in.vertexColor);
+        int idx = (word >> ((UV.x & 3) << 2)) & 0xf;
+        texColor = color16toFloat4(readVRAM16(vramTex, int2(in.clutBase.x + idx, in.clutBase.y)));
     } else if (in.texMode == 1) {  // 8bpp
         int2 tc = int2(UV.x >> 1, UV.y) + in.texpageBase;
         uint word = readVRAM16(vramTex, tc);
-        int shift = (UV.x & 1) << 3;
-        int idx = (word >> shift) & 0xff;
-        uint clutWord = readVRAM16(vramTex, int2(in.clutBase.x + idx, in.clutBase.y));
-        out.color = color16toFloat4(clutWord);
-        if (all(out.color.rgb == float3(0.0))) discard_fragment();
-        out.blendColor = out.color.a >= 0.5 ? float4(u.blendR, u.blendG, u.blendB, u.blendA)
-                                           : float4(u.blendOpaqueR, u.blendOpaqueG, u.blendOpaqueB, u.blendOpaqueA);
-        out.color = texBlend(out.color, in.vertexColor);
-    } else {  // 16bpp (modes 2 and 3)
-        int2 tc = UV + in.texpageBase;
-        uint word = readVRAM16(vramTex, tc);
-        out.color = color16toFloat4(word);
-        if (all(out.color.rgb == float3(0.0))) discard_fragment();
-        out.color = texBlend(out.color, in.vertexColor);
-        out.blendColor = float4(u.blendR, u.blendG, u.blendB, u.blendA);
+        int idx = (word >> ((UV.x & 1) << 3)) & 0xff;
+        texColor = color16toFloat4(readVRAM16(vramTex, int2(in.clutBase.x + idx, in.clutBase.y)));
+    } else {  // 16bpp
+        texColor = color16toFloat4(readVRAM16(vramTex, UV + in.texpageBase));
+    }
+
+    // Black = fully transparent
+    if (all(texColor.rgb == float3(0.0))) discard_fragment();
+
+    // Apply texture blending (modulate texture by vertex color)
+    float4 color = texBlend(texColor, in.vertexColor);
+
+    // Per-pixel semi-transparency: MSB (alpha) of the texel determines
+    // whether this pixel is semi-transparent or opaque.
+    bool semiTransparent = texColor.a >= 0.5;
+    if (semiTransparent) {
+        // Premultiply by src factor, dst gets blendA weight
+        out.color = float4(color.rgb * u.blendR, 1.0);
+        out.blendColor = float4(0.0, 0.0, 0.0, u.blendA);
+    } else {
+        // Opaque: full src color, dst weight = 0 (replace)
+        out.color = float4(color.rgb, 1.0);
+        out.blendColor = float4(0.0, 0.0, 0.0, 0.0);
     }
     return out;
 }
@@ -256,7 +263,9 @@ static id<MTLRenderPipelineState> makePSO(id<MTLDevice> device,
         desc.colorAttachments[0].blendingEnabled          = YES;
         desc.colorAttachments[0].rgbBlendOperation        = blendOp;
         desc.colorAttachments[0].alphaBlendOperation      = MTLBlendOperationAdd;
-        desc.colorAttachments[0].sourceRGBBlendFactor      = MTLBlendFactorSource1Color;
+        // Source color is premultiplied by src_alpha_factor in the shader
+        desc.colorAttachments[0].sourceRGBBlendFactor      = MTLBlendFactorOne;
+        // Destination weight comes from second output's alpha channel
         desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorSource1Alpha;
         desc.colorAttachments[0].sourceAlphaBlendFactor    = MTLBlendFactorOne;
         desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorZero;
@@ -480,49 +489,30 @@ void PCSX::MetalGPU::renderBatch() {
     // Upload vertices to the streaming buffer
     memcpy(m_mtl->vertexBuffer.contents, m_vertices.data(), m_vertexCount * sizeof(Vertex));
 
-    // Select pipeline
+    // Select pipeline based on transparency mode
     id<MTLRenderPipelineState> pso = m_mtl->psoOpaque;
-    if (m_lastTransparency == Transparency::Transparent && m_lastBlendingMode != 2) {
-        pso = m_mtl->psoBlendAdd;
+    if (m_lastTransparency == Transparency::Transparent) {
+        pso = (m_lastBlendingMode == 2) ? m_mtl->psoBlendRevSub : m_mtl->psoBlendAdd;
     }
 
-    // Encode a draw into the frame command buffer (no commit, no wait)
-    auto drawOnce = [&](id<MTLRenderPipelineState> pipeline) {
-        m_mtl->ensureNoRenderEncoder();
-        m_mtl->ensureFrameCmdBuf();
+    // Encode draw into the frame command buffer (no commit, no wait)
+    m_mtl->ensureNoRenderEncoder();
+    m_mtl->ensureFrameCmdBuf();
 
-        auto *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-        rpd.colorAttachments[0].texture     = m_mtl->vramRenderTarget;
-        rpd.colorAttachments[0].loadAction  = MTLLoadActionLoad;
-        rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+    auto *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+    rpd.colorAttachments[0].texture     = m_mtl->vramRenderTarget;
+    rpd.colorAttachments[0].loadAction  = MTLLoadActionLoad;
+    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-        auto *enc = [m_mtl->frameCmdBuf renderCommandEncoderWithDescriptor:rpd];
-        [enc setRenderPipelineState:pipeline];
-        [enc setVertexBuffer:m_mtl->vertexBuffer offset:0 atIndex:0];
-        [enc setVertexBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
-        [enc setFragmentBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
-        [enc setFragmentTexture:m_mtl->vramSampleTexture atIndex:0];
-        [enc setScissorRect:m_mtl->scissor];
-        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:m_vertexCount];
-        [enc endEncoding];
-    };
-
-    if (m_lastBlendingMode == 2 && m_lastTransparency == Transparency::Transparent) {
-        float savedR = m_uniforms.blendR, savedG = m_uniforms.blendG;
-        float savedB = m_uniforms.blendB, savedA = m_uniforms.blendA;
-        m_uniforms.blendR = m_uniforms.blendG = m_uniforms.blendB = 0.0f;
-        m_uniforms.blendA = 1.0f;
-        drawOnce(m_mtl->psoBlendAdd);
-
-        m_uniforms.blendR = m_uniforms.blendG = m_uniforms.blendB = 1.0f;
-        m_uniforms.blendA = 1.0f;
-        drawOnce(m_mtl->psoBlendRevSub);
-
-        m_uniforms.blendR = savedR; m_uniforms.blendG = savedG;
-        m_uniforms.blendB = savedB; m_uniforms.blendA = savedA;
-    } else {
-        drawOnce(pso);
-    }
+    auto *enc = [m_mtl->frameCmdBuf renderCommandEncoderWithDescriptor:rpd];
+    [enc setRenderPipelineState:pso];
+    [enc setVertexBuffer:m_mtl->vertexBuffer offset:0 atIndex:0];
+    [enc setVertexBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
+    [enc setFragmentBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
+    [enc setFragmentTexture:m_mtl->vramSampleTexture atIndex:0];
+    [enc setScissorRect:m_mtl->scissor];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:m_vertexCount];
+    [enc endEncoding];
 
     s_log.totalVerts += m_vertexCount;
     s_log.batches++;
@@ -611,7 +601,10 @@ void PCSX::MetalGPU::setTransparency() {
     if (m_lastTransparency == setting) return;
     renderBatch();
     m_lastTransparency = setting;
-    if constexpr (setting == Transparency::Opaque) m_lastBlendingMode = -1;
+    if constexpr (setting == Transparency::Opaque) {
+        m_lastBlendingMode = -1;
+        setBlendFactors(1.0f, 0.0f);  // full src, no dst contribution
+    }
 }
 
 void PCSX::MetalGPU::setBlendingModeFromTexpage(uint32_t texpage) {
@@ -622,7 +615,7 @@ void PCSX::MetalGPU::setBlendingModeFromTexpage(uint32_t texpage) {
     switch (mode) {
         case 0: setBlendFactors(0.5f, 0.5f); break;   // B/2 + F/2
         case 1: setBlendFactors(1.0f, 1.0f); break;   // B + F
-        case 2: break;                                  // B - F (handled in renderBatch)
+        case 2: setBlendFactors(1.0f, 1.0f); break;   // B - F (ReverseSubtract)
         case 3: setBlendFactors(0.25f, 1.0f); break;  // B + F/4
     }
 }
