@@ -170,21 +170,71 @@ fragment FragmentOut fragmentMain(VertexOut in [[stage_in]],
 )MSL";
 
 // ---------------------------------------------------------------------------
+// Compute shader: convert RGBA8 render target → R16Uint sample texture (on GPU)
+// ---------------------------------------------------------------------------
+static NSString *const s_syncComputeSource = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void rgba8ToR16(texture2d<float, access::read>  src [[texture(0)]],
+                       texture2d<uint, access::write>   dst [[texture(1)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= 1024 || gid.y >= 512) return;
+    float4 c = src.read(gid);
+    uint r = uint(c.r * 31.0 + 0.5);
+    uint g = uint(c.g * 31.0 + 0.5);
+    uint b = uint(c.b * 31.0 + 0.5);
+    uint a = uint(ceil(c.a));
+    dst.write(uint4(r | (g << 5) | (b << 10) | (a << 15), 0, 0, 0), gid);
+}
+)MSL";
+
+// ---------------------------------------------------------------------------
 // Metal objects stored as ObjC types (hidden from the header)
 // ---------------------------------------------------------------------------
 struct PCSX::MetalGPU::MetalObjects {
     id<MTLDevice>               device = nil;
     id<MTLCommandQueue>         commandQueue = nil;
     id<MTLTexture>              vramRenderTarget = nil;   // render target (1024x512 RGBA8)
-    id<MTLTexture>              vramSampleTexture = nil;  // read by fragment shader
+    id<MTLTexture>              vramSampleTexture = nil;  // R16Uint — raw 16-bit VRAM for shader reads
     id<MTLTexture>              displayTexture = nil;     // decoded display output (for 24-bit mode)
     id<MTLTexture>              displaySnapshot = nil;    // snapshot of VRAM for ImGui to sample
     id<MTLBuffer>               vertexBuffer = nil;       // streaming vertex data
-    id<MTLRenderPipelineState>  psoOpaque = nil;          // blending disabled
-    id<MTLRenderPipelineState>  psoBlendAdd = nil;        // dual-source, equation = add
-    id<MTLRenderPipelineState>  psoBlendRevSub = nil;     // dual-source, equation = reverse subtract
+    id<MTLRenderPipelineState>  psoOpaque = nil;
+    id<MTLRenderPipelineState>  psoBlendAdd = nil;
+    id<MTLRenderPipelineState>  psoBlendRevSub = nil;
+    id<MTLComputePipelineState> syncComputePSO = nil;     // RGBA8 → R16Uint conversion
     MTLScissorRect              scissor = {0, 0, 1024, 512};
-    bool                        display24bit = false;     // true when showing 24-bit decoded texture
+    bool                        display24bit = false;
+
+    // Per-frame command buffer — created at frame start, committed at vblank.
+    // All draws, blits, and syncs within a frame share this command buffer.
+    id<MTLCommandBuffer>        frameCmdBuf = nil;
+    bool                        renderEncoderActive = false;
+    id<MTLRenderCommandEncoder> renderEncoder = nil;
+
+    void ensureNoRenderEncoder() {
+        if (renderEncoderActive) {
+            [renderEncoder endEncoding];
+            renderEncoder = nil;
+            renderEncoderActive = false;
+        }
+    }
+
+    void ensureFrameCmdBuf() {
+        if (!frameCmdBuf) {
+            frameCmdBuf = [commandQueue commandBuffer];
+        }
+    }
+
+    void commitAndWait() {
+        ensureNoRenderEncoder();
+        if (frameCmdBuf) {
+            [frameCmdBuf commit];
+            [frameCmdBuf waitUntilCompleted];
+            frameCmdBuf = nil;
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -289,7 +339,7 @@ int PCSX::MetalGPU::initBackend(UI *) {
                                                                          width:c_vramWidth
                                                                         height:c_vramHeight
                                                                      mipmapped:NO];
-    sampleDesc.usage = MTLTextureUsageShaderRead;
+    sampleDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     sampleDesc.storageMode = MTLStorageModeShared;
     m_mtl->vramSampleTexture = [m_mtl->device newTextureWithDescriptor:sampleDesc];
 
@@ -356,6 +406,19 @@ int PCSX::MetalGPU::initBackend(UI *) {
 
     if (!m_mtl->psoOpaque || !m_mtl->psoBlendAdd || !m_mtl->psoBlendRevSub) return -1;
 
+    // --- RGBA8→R16Uint compute pipeline for VRAM sync ---
+    {
+        NSError *syncErr = nil;
+        auto *syncLib = [m_mtl->device newLibraryWithSource:s_syncComputeSource options:nil error:&syncErr];
+        if (!syncLib) { NSLog(@"Sync compute shader error: %@", syncErr); return -1; }
+        auto *syncFunc = [syncLib newFunctionWithName:@"rgba8ToR16"];
+        m_mtl->syncComputePSO = [m_mtl->device newComputePipelineStateWithFunction:syncFunc error:&syncErr];
+        if (!m_mtl->syncComputePSO) { NSLog(@"Sync compute PSO error: %@", syncErr); return -1; }
+    }
+
+    // Need write access on sample texture for the compute shader
+    // (already created above — but need to update usage)
+
     // --- Initial uniform state ---
     m_uniforms.drawOffsetX = 0.5f;
     m_uniforms.drawOffsetY = -0.5f;
@@ -374,6 +437,7 @@ int PCSX::MetalGPU::initBackend(UI *) {
 
 int PCSX::MetalGPU::shutdown() {
     if (m_mtl) {
+        m_mtl->commitAndWait();
         delete m_mtl;
         m_mtl = nullptr;
     }
@@ -387,33 +451,17 @@ void PCSX::MetalGPU::syncVRAMTexture() {
     if (!m_syncVRAM || !m_mtl) return;
     m_syncVRAM = false;
 
-    // Read RGBA8 render target back to CPU, convert to raw 16-bit, upload to R16Uint sample texture.
-    constexpr size_t vramBytes = c_vramWidth * c_vramHeight * 4;
-    auto *staging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
-    auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
-    auto *blit = [cmdBuf blitCommandEncoder];
-    [blit copyFromTexture:m_mtl->vramRenderTarget sourceSlice:0 sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(c_vramWidth, c_vramHeight, 1)
-               toBuffer:staging destinationOffset:0 destinationBytesPerRow:c_vramWidth * 4
-      destinationBytesPerImage:vramBytes];
-    [blit endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-
-    // Convert RGBA8 → raw 16-bit (5:5:5:1)
-    auto *rgba = (const uint8_t *)staging.contents;
-    constexpr size_t pixCount = c_vramWidth * c_vramHeight;
-    std::vector<uint16_t> raw16(pixCount);
-    for (size_t i = 0; i < pixCount; i++) {
-        uint8_t r = rgba[i * 4 + 0], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
-        raw16[i] = ((r * 31 + 127) / 255) | (((g * 31 + 127) / 255) << 5) |
-                   (((b * 31 + 127) / 255) << 10) | ((a >> 7) << 15);
-    }
-
-    [m_mtl->vramSampleTexture replaceRegion:MTLRegionMake2D(0, 0, c_vramWidth, c_vramHeight)
-                                mipmapLevel:0
-                                  withBytes:raw16.data()
-                                bytesPerRow:c_vramWidth * sizeof(uint16_t)];
+    // Convert RGBA8 render target → R16Uint sample texture entirely on GPU.
+    m_mtl->ensureNoRenderEncoder();
+    m_mtl->ensureFrameCmdBuf();
+    auto *enc = [m_mtl->frameCmdBuf computeCommandEncoder];
+    [enc setComputePipelineState:m_mtl->syncComputePSO];
+    [enc setTexture:m_mtl->vramRenderTarget atIndex:0];
+    [enc setTexture:m_mtl->vramSampleTexture atIndex:1];
+    MTLSize gridSize = MTLSizeMake(c_vramWidth, c_vramHeight, 1);
+    MTLSize threadgroupSize = MTLSizeMake(16, 16, 1);
+    [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
+    [enc endEncoding];
 }
 
 // ---------------------------------------------------------------------------
@@ -424,14 +472,12 @@ void PCSX::MetalGPU::renderBatch() {
 
     syncVRAMTexture();
 
-
-
     // Apply deferred draw offset
     if (m_updateDrawOffset) {
         setDrawOffset(m_lastDrawOffsetSetting);
     }
 
-    // Upload vertices
+    // Upload vertices to the streaming buffer
     memcpy(m_mtl->vertexBuffer.contents, m_vertices.data(), m_vertexCount * sizeof(Vertex));
 
     // Select pipeline
@@ -440,14 +486,17 @@ void PCSX::MetalGPU::renderBatch() {
         pso = m_mtl->psoBlendAdd;
     }
 
+    // Encode a draw into the frame command buffer (no commit, no wait)
     auto drawOnce = [&](id<MTLRenderPipelineState> pipeline) {
+        m_mtl->ensureNoRenderEncoder();
+        m_mtl->ensureFrameCmdBuf();
+
         auto *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
         rpd.colorAttachments[0].texture     = m_mtl->vramRenderTarget;
         rpd.colorAttachments[0].loadAction  = MTLLoadActionLoad;
         rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-        auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
-        auto *enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
+        auto *enc = [m_mtl->frameCmdBuf renderCommandEncoderWithDescriptor:rpd];
         [enc setRenderPipelineState:pipeline];
         [enc setVertexBuffer:m_mtl->vertexBuffer offset:0 atIndex:0];
         [enc setVertexBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
@@ -456,25 +505,19 @@ void PCSX::MetalGPU::renderBatch() {
         [enc setScissorRect:m_mtl->scissor];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:m_vertexCount];
         [enc endEncoding];
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
     };
 
     if (m_lastBlendingMode == 2 && m_lastTransparency == Transparency::Transparent) {
-        // Subtractive blending: two passes
-        // Pass 1: opaque parts (add, factors 0/1)
         float savedR = m_uniforms.blendR, savedG = m_uniforms.blendG;
         float savedB = m_uniforms.blendB, savedA = m_uniforms.blendA;
         m_uniforms.blendR = m_uniforms.blendG = m_uniforms.blendB = 0.0f;
         m_uniforms.blendA = 1.0f;
         drawOnce(m_mtl->psoBlendAdd);
 
-        // Pass 2: subtract transparent parts
         m_uniforms.blendR = m_uniforms.blendG = m_uniforms.blendB = 1.0f;
         m_uniforms.blendA = 1.0f;
         drawOnce(m_mtl->psoBlendRevSub);
 
-        // Restore
         m_uniforms.blendR = savedR; m_uniforms.blendG = savedG;
         m_uniforms.blendB = savedB; m_uniforms.blendA = savedA;
     } else {
@@ -659,11 +702,12 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
     rpd.colorAttachments[0].loadAction  = MTLLoadActionLoad;
     rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-    auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
-    auto *enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
+    m_mtl->ensureNoRenderEncoder();
+    m_mtl->ensureFrameCmdBuf();
+
+    auto *enc = [m_mtl->frameCmdBuf renderCommandEncoderWithDescriptor:rpd];
     [enc setRenderPipelineState:m_mtl->psoOpaque];
 
-    // Draw a solid-color quad covering the fill region
     Vertex fillVerts[6];
     uint32_t col = (uint32_t)(r * 255) | ((uint32_t)(g * 255) << 8) | ((uint32_t)(b * 255) << 16);
     int fx = cmd->x, fy = cmd->y, fw = cmd->w, fh = cmd->h;
@@ -674,7 +718,6 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
     fillVerts[4] = Vertex(fx,      fy + fh, col);
     fillVerts[5] = Vertex(fx,      fy,      col);
 
-    // Temporarily use identity offset for direct VRAM coordinates
     Uniforms fillU = m_uniforms;
     fillU.drawOffsetX = 0.5f;
     fillU.drawOffsetY = -0.5f;
@@ -687,13 +730,10 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
     [enc setVertexBytes:&fillU length:sizeof(fillU) atIndex:1];
     [enc setFragmentBytes:&fillU length:sizeof(fillU) atIndex:1];
     [enc setFragmentTexture:m_mtl->vramSampleTexture atIndex:0];
-    // Full VRAM scissor for fill
     MTLScissorRect fullScissor = {0, 0, (NSUInteger)c_vramWidth, (NSUInteger)c_vramHeight};
     [enc setScissorRect:fullScissor];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [enc endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
 
     m_syncVRAM = true;
 }
@@ -790,9 +830,9 @@ void PCSX::MetalGPU::write0(BlitVramVram *cmd) {
     renderBatch();
     if (!m_mtl || cmd->w == 0 || cmd->h == 0) return;
 
-    // Use Metal blit encoder to copy region within the VRAM texture
-    auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
-    auto *blit = [cmdBuf blitCommandEncoder];
+    m_mtl->ensureNoRenderEncoder();
+    m_mtl->ensureFrameCmdBuf();
+    auto *blit = [m_mtl->frameCmdBuf blitCommandEncoder];
     [blit copyFromTexture:m_mtl->vramRenderTarget
               sourceSlice:0 sourceLevel:0
              sourceOrigin:MTLOriginMake(cmd->sX, cmd->sY, 0)
@@ -801,8 +841,6 @@ void PCSX::MetalGPU::write0(BlitVramVram *cmd) {
          destinationSlice:0 destinationLevel:0
         destinationOrigin:MTLOriginMake(cmd->dX, cmd->dY, 0)];
     [blit endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
     m_syncVRAM = true;
 }
 
@@ -861,10 +899,13 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
     s_log.dump(m_display);
     if (!m_mtl) return;
 
+    // Commit the frame's command buffer — ONE GPU sync per frame.
+    m_mtl->commitAndWait();
+
     m_mtl->display24bit = m_display.enabled && (m_display.info.depth == CtrlDisplayMode::CD_24BITS);
 
     if (m_mtl->display24bit) {
-        // --- 24-bit display decode from raw 16-bit VRAM mirror ---
+        // 24-bit display decode from raw 16-bit VRAM mirror
         int dispX = m_display.start.x();
         int dispY = m_display.start.y();
         int dispW = m_display.size.x();
@@ -904,21 +945,21 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
                                    withBytes:decoded.data()
                                  bytesPerRow:dispW * 4];
     } else {
-        // Read back VRAM render target to CPU buffer, upload to displayTexture.
-        // This matches the software GPU pattern: CPU buffer → shared texture → ImGui.
+        // Blit VRAM render target → display texture for ImGui.
+        // The frame command buffer was already committed above, so the render target
+        // has all the frame's draws. Use a new command buffer for the readback.
         constexpr size_t vramBytes = c_vramWidth * c_vramHeight * 4;
         auto *staging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
-        auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
-        auto *blit = [cmdBuf blitCommandEncoder];
+        auto *cb = [m_mtl->commandQueue commandBuffer];
+        auto *blit = [cb blitCommandEncoder];
         [blit copyFromTexture:m_mtl->vramRenderTarget sourceSlice:0 sourceLevel:0
                  sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(c_vramWidth, c_vramHeight, 1)
                    toBuffer:staging destinationOffset:0 destinationBytesPerRow:c_vramWidth * 4
           destinationBytesPerImage:vramBytes];
         [blit endEncoding];
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        [cb commit];
+        [cb waitUntilCompleted];
 
-        // No Y flip needed — viewport flip keeps everything in PSX coordinates
         [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, c_vramWidth, c_vramHeight)
                                  mipmapLevel:0
                                    withBytes:staging.contents
@@ -932,16 +973,15 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
 // ---------------------------------------------------------------------------
 void PCSX::MetalGPU::clearVRAM() {
     if (!m_mtl) return;
+    m_mtl->ensureNoRenderEncoder();
+    m_mtl->ensureFrameCmdBuf();
     auto *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
     rpd.colorAttachments[0].texture     = m_mtl->vramRenderTarget;
     rpd.colorAttachments[0].loadAction  = MTLLoadActionClear;
     rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
     rpd.colorAttachments[0].clearColor  = MTLClearColorMake(0, 0, 0, 0);
-    auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
-    auto *enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
+    auto *enc = [m_mtl->frameCmdBuf renderCommandEncoderWithDescriptor:rpd];
     [enc endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
     m_syncVRAM = true;
 }
 
@@ -963,9 +1003,9 @@ GLuint PCSX::MetalGPU::getVRAMTexture() { return 0; }
 void PCSX::MetalGPU::setLinearFiltering() {}
 
 PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {
-    // Read pixels back from Metal texture
     if (!m_mtl) return {};
     renderBatch();
+    m_mtl->commitAndWait();  // ensure all GPU work is done before readback
 
     constexpr size_t vramBytes = c_vramWidth * c_vramHeight * 4;  // RGBA8
     auto *staging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
@@ -1028,15 +1068,14 @@ void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_
     }
     size_t byteSize = rgba.size() * 4;
     auto *staging = [m_mtl->device newBufferWithBytes:rgba.data() length:byteSize options:MTLResourceStorageModeShared];
-    auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
-    auto *blit = [cmdBuf blitCommandEncoder];
+    m_mtl->ensureNoRenderEncoder();
+    m_mtl->ensureFrameCmdBuf();
+    auto *blit = [m_mtl->frameCmdBuf blitCommandEncoder];
     [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:w * 4 sourceBytesPerImage:byteSize
                sourceSize:MTLSizeMake(w, h, 1)
                toTexture:m_mtl->vramRenderTarget destinationSlice:0 destinationLevel:0
         destinationOrigin:MTLOriginMake(x, y, 0)];
     [blit endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
 
     m_syncVRAM = true;
 }
