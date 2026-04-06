@@ -65,9 +65,9 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
     float x = float(in.position.x);
     float y = float(in.position.y);
     float xx = (x + u.drawOffset.x) / 512.0 - 1.0;
-    // Negate Y so PSX Y=0 (top of screen) maps to Metal texture row 0 (top).
-    // Without this, Y=0 maps to clip -1 which is the bottom row in Metal.
-    float yy = 1.0 - (y + u.drawOffset.y) / 256.0;
+    // No Y flip in shader — viewport flip handles Metal's inverted Y.
+    // Everything stays in PSX coordinates.
+    float yy = (y + u.drawOffset.y) / 256.0 - 1.0;
 
     float red   = float(in.color & 0xffu);
     float green = float((in.color >> 8u) & 0xffu);
@@ -138,7 +138,7 @@ fragment FragmentOut fragmentMain(VertexOut in [[stage_in]],
         int shift = (UV.x & 3) << 2;
         int idx = (s >> shift) & 0xf;
         int2 sc = int2(in.clutBase.x + idx, in.clutBase.y);
-        out.color = vramTex.read(uint2(sc));
+        out.color = vramTex.read(uint2(sc & int2(1023, 511)));
         if (all(out.color.rgb == float3(0.0))) discard_fragment();
         out.blendColor = out.color.a >= 0.5 ? u.blendFactors : u.blendFactorsIfOpaque;
         out.color = texBlend(out.color, in.vertexColor);
@@ -148,7 +148,7 @@ fragment FragmentOut fragmentMain(VertexOut in [[stage_in]],
         int shift = (UV.x & 1) << 3;
         int idx = (s >> shift) & 0xff;
         int2 sc = int2(in.clutBase.x + idx, in.clutBase.y);
-        out.color = vramTex.read(uint2(sc));
+        out.color = vramTex.read(uint2(sc & int2(1023, 511)));
         if (all(out.color.rgb == float3(0.0))) discard_fragment();
         out.blendColor = out.color.a >= 0.5 ? u.blendFactors : u.blendFactorsIfOpaque;
         out.color = texBlend(out.color, in.vertexColor);
@@ -395,6 +395,8 @@ void PCSX::MetalGPU::renderBatch() {
 
     syncVRAMTexture();
 
+
+
     // Apply deferred draw offset
     if (m_updateDrawOffset) {
         setDrawOffset(m_lastDrawOffsetSetting);
@@ -418,6 +420,10 @@ void PCSX::MetalGPU::renderBatch() {
         auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
         auto *enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
         [enc setRenderPipelineState:pipeline];
+        // Flip viewport Y so PSX Y=0 maps to texture row 0 (top).
+        // Everything thinks in PSX coordinates — no flipping anywhere else.
+        MTLViewport vp = {0, (double)c_vramHeight, (double)c_vramWidth, -(double)c_vramHeight, 0, 1};
+        [enc setViewport:vp];
         [enc setVertexBuffer:m_mtl->vertexBuffer offset:0 atIndex:0];
         [enc setVertexBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
         [enc setFragmentBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
@@ -631,6 +637,8 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
     auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
     auto *enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
     [enc setRenderPipelineState:m_mtl->psoOpaque];
+    MTLViewport fillVP = {0, (double)c_vramHeight, (double)c_vramWidth, -(double)c_vramHeight, 0, 1};
+    [enc setViewport:fillVP];
 
     // Draw a solid-color quad covering the fill region
     Vertex fillVerts[6];
@@ -887,6 +895,7 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];
 
+        // No Y flip needed — viewport flip keeps everything in PSX coordinates
         [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, c_vramWidth, c_vramHeight)
                                  mipmapLevel:0
                                    withBytes:staging.contents
