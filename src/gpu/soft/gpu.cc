@@ -84,8 +84,10 @@ std::unique_ptr<PCSX::GPU> PCSX::GPU::getSoft() { return std::unique_ptr<PCSX::G
 
 void PCSX::SoftGPU::impl::updateDisplay(bool fromGui) {
     if (m_softDisplay.Disabled) {
+#ifndef PCSX_METAL
         glClearColor(1, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
+#endif
         return;
     }
 
@@ -125,8 +127,10 @@ void PCSX::SoftGPU::impl::changeDispOffsetsX() {
 
             m_previousDisplay.Range.x1 += (int16_t)(lx - l);
         }
+#ifndef PCSX_METAL
         glClearColor(1, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
+#endif
     }
 
     m_doVSyncUpdate = true;
@@ -171,8 +175,10 @@ void PCSX::SoftGPU::impl::changeDispOffsetsY() {
     }
 
     if (iO != m_previousDisplay.Range.y0) {
+#ifndef PCSX_METAL
         glClearColor(1, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
+#endif
     }
 }
 

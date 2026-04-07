@@ -78,7 +78,7 @@ extern "C" {
 #endif
 #ifdef PCSX_METAL
 #include "gui/gui_metal.h"
-#include "gpu/metal/gpu_metal.h"
+// gpu_metal.h no longer needed — getDisplayTextureID/getDisplayUVs are virtual on GPU base class
 #endif
 #include "imgui_internal.h"
 #include "imgui_stdlib.h"
@@ -1232,7 +1232,7 @@ void PCSX::GUI::endFrame() {
     if (m_fullWindowRender) {
 #ifdef PCSX_METAL
         ImTextureID texture = reinterpret_cast<ImTextureID>(
-            static_cast<MetalGPU *>(g_emulator->m_gpu.get())->getDisplayTextureID());
+            g_emulator->m_gpu->getDisplayTextureID());
 #else
         ImTextureID texture = m_offscreenTextures[m_currentTexture];
 #endif
@@ -1256,7 +1256,7 @@ void PCSX::GUI::endFrame() {
         ) {
 #ifdef PCSX_METAL
             float mu0, mv0, mu1, mv1;
-            static_cast<MetalGPU *>(g_emulator->m_gpu.get())->getDisplayUVs(mu0, mv0, mu1, mv1);
+            g_emulator->m_gpu->getDisplayUVs(mu0, mv0, mu1, mv1);
             ImVec2 uv0(mu0, mv0);
             ImVec2 uv1(mu1, mv1);
             ImGui::Image(texture, logicalRenderSize, uv0, uv1);
@@ -1291,7 +1291,7 @@ void PCSX::GUI::endFrame() {
             ImGui::SetCursorPos(ImGui::GetCursorPos() + (contentRegion - textureSize) * 0.5f);
 #ifdef PCSX_METAL
             ImTextureID texture = reinterpret_cast<ImTextureID>(
-                static_cast<MetalGPU *>(g_emulator->m_gpu.get())->getDisplayTextureID());
+                g_emulator->m_gpu->getDisplayTextureID());
 #else
             ImTextureID texture = m_offscreenTextures[m_currentTexture];
 #endif
@@ -1302,7 +1302,7 @@ void PCSX::GUI::endFrame() {
             ) {
 #ifdef PCSX_METAL
                 float mu0, mv0, mu1, mv1;
-                static_cast<MetalGPU *>(g_emulator->m_gpu.get())->getDisplayUVs(mu0, mv0, mu1, mv1);
+                g_emulator->m_gpu->getDisplayUVs(mu0, mv0, mu1, mv1);
                 ImVec2 uv0(mu0, mv0);
                 ImVec2 uv1(mu1, mv1);
                 ImGui::Image(texture, textureSize, uv0, uv1);

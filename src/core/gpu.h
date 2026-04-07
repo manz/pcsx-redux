@@ -119,6 +119,11 @@ class GPU {
     static std::unique_ptr<GPU> getOpenGL();
 #ifdef PCSX_METAL
     static std::unique_ptr<GPU> getMetal();
+    virtual void *getDisplayTextureID() { return nullptr; }
+    virtual void getDisplayUVs(float &u0, float &v0, float &u1, float &v1) {
+        u0 = v0 = 0;
+        u1 = v1 = 1;
+    }
 #endif
 
     enum class Ownership { BORROW, ACQUIRE };

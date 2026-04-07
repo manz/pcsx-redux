@@ -103,7 +103,7 @@ class MetalGPUTest : public ::testing::Test {
 
     // Draw triangles
     void draw(const std::vector<Vertex> &verts, bool /*unused*/ = false) {
-        Uniforms u = {0.5f, -0.5f, ~0, ~0, 0, 0, 1,1,1,0, 1,1,1,0};
+        Uniforms u = {0.5f, 0.5f, ~0, ~0, 0, 0, 1,1,1,0, 1,1,1,0};
         auto *buf = [dev newBufferWithBytes:verts.data() length:verts.size()*sizeof(Vertex) options:MTLResourceStorageModeShared];
         auto *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
         rpd.colorAttachments[0].texture = vramRT;
@@ -449,10 +449,9 @@ TEST_F(MetalGPUTest, Texture8bpp_CLUTLookupProducesVariedColors) {
 
     // Check: pixel at x=200 should have CLUT index 0 (dim red)
     // pixel at x=232 should have CLUT index 32 (brighter red)
-    // Viewport flip + draw offset (-0.5) shifts Y by 1 pixel
-    auto px0 = readPixel(200, 199);
-    auto px32 = readPixel(232, 199);
-    auto px63 = readPixel(263, 199);
+    auto px0 = readPixel(200, 200);
+    auto px32 = readPixel(232, 200);
+    auto px63 = readPixel(263, 200);
 
     printf("px0: R=%d G=%d B=%d A=%d\n", px0.r, px0.g, px0.b, px0.a);
     printf("px32: R=%d G=%d B=%d A=%d\n", px32.r, px32.g, px32.b, px32.a);
@@ -466,7 +465,7 @@ TEST_F(MetalGPUTest, Texture8bpp_CLUTLookupProducesVariedColors) {
     int distinctColors = 0;
     uint8_t lastR = 255;
     for (int x = 200; x < 264; x++) {
-        auto px = readPixel(x, 199);
+        auto px = readPixel(x, 200);
         if (px.r != lastR) { distinctColors++; lastR = px.r; }
     }
     EXPECT_GT(distinctColors, 10) << "8bpp texture should produce many distinct colors across 64 pixels";

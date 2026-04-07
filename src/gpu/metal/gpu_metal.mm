@@ -60,6 +60,8 @@ struct Uniforms {
     int texWindowOffY;
     float blendR, blendG, blendB, blendA;
     float blendOpaqueR, blendOpaqueG, blendOpaqueB, blendOpaqueA;
+    int setMask;    // force MSB=1 on written pixels
+    int checkMask;  // skip writes to pixels with MSB=1
 };
 
 vertex VertexOut vertexMain(VertexIn in [[stage_in]],
@@ -126,11 +128,14 @@ fragment FragmentOut fragmentMain(VertexOut in [[stage_in]],
                                   constant Uniforms &u [[buffer(1)]]) {
     FragmentOut out;
 
+    // TODO: checkMask needs a dedicated stencil buffer — using RT alpha doesn't work
+    // because VRAM texture regions have MSB=1 from CPU uploads, causing false positives.
+    // For now, checkMask is tracked in uniforms but not enforced in the shader.
+
     // Untextured primitive
     if (in.texMode == 4) {
-        // Premultiply by src factor (blendR = src_alpha_factor for all channels)
-        out.color = float4(in.vertexColor.rgb * u.blendR, 1.0);
-        // Destination weight in alpha of second output
+        float a = u.setMask ? 1.0 : 0.0;
+        out.color = float4(in.vertexColor.rgb * u.blendR, a);
         out.blendColor = float4(0.0, 0.0, 0.0, u.blendA);
         return out;
     }
@@ -154,22 +159,24 @@ fragment FragmentOut fragmentMain(VertexOut in [[stage_in]],
         texColor = color16toFloat4(readVRAM16(vramTex, UV + in.texpageBase));
     }
 
-    // Black = fully transparent
-    if (all(texColor.rgb == float3(0.0))) discard_fragment();
+    // Raw 16-bit value 0x0000 = fully transparent (never drawn).
+    // 0x8000 (black with MSB=1) IS drawn — it produces a dimming effect
+    // when semi-transparent blending is active.
+    if (all(texColor.rgb == float3(0.0)) && texColor.a < 0.5) discard_fragment();
 
     // Apply texture blending (modulate texture by vertex color)
     float4 color = texBlend(texColor, in.vertexColor);
 
     // Per-pixel semi-transparency: MSB (alpha) of the texel determines
     // whether this pixel is semi-transparent or opaque.
+    float maskAlpha = u.setMask ? 1.0 : texColor.a;
     bool semiTransparent = texColor.a >= 0.5;
     if (semiTransparent) {
-        // Premultiply by src factor, dst gets blendA weight
-        out.color = float4(color.rgb * u.blendR, 1.0);
+        out.color = float4(color.rgb * u.blendR, maskAlpha);
         out.blendColor = float4(0.0, 0.0, 0.0, u.blendA);
     } else {
-        // Opaque: full src color, dst weight = 0 (replace)
-        out.color = float4(color.rgb, 1.0);
+        float a = u.setMask ? 1.0 : 0.0;
+        out.color = float4(color.rgb, a);
         out.blendColor = float4(0.0, 0.0, 0.0, 0.0);
     }
     return out;
@@ -185,14 +192,16 @@ using namespace metal;
 
 kernel void rgba8ToR16(texture2d<float, access::read>  src [[texture(0)]],
                        texture2d<uint, access::write>   dst [[texture(1)]],
+                       constant uint2 &offset [[buffer(0)]],
                        uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= 1024 || gid.y >= 512) return;
-    float4 c = src.read(gid);
+    uint2 pos = gid + offset;
+    if (pos.x >= 1024 || pos.y >= 512) return;
+    float4 c = src.read(pos);
     uint r = uint(c.r * 31.0 + 0.5);
     uint g = uint(c.g * 31.0 + 0.5);
     uint b = uint(c.b * 31.0 + 0.5);
     uint a = uint(ceil(c.a));
-    dst.write(uint4(r | (g << 5) | (b << 10) | (a << 15), 0, 0, 0), gid);
+    dst.write(uint4(r | (g << 5) | (b << 10) | (a << 15), 0, 0, 0), pos);
 }
 )MSL";
 
@@ -291,6 +300,8 @@ static struct {
     int cpuUploads = 0;
     int totalVerts = 0;
     int batches = 0;
+    int batchesOpaque = 0;
+    int batchesSemiTrans = 0;
     int frameNum = 0;
     int scissorX = 0, scissorY = 0, scissorW = 0, scissorH = 0;
     bool enabled = false;  // set to true to enable periodic GPU command logging
@@ -299,18 +310,19 @@ static struct {
     void reset() {
         polysUntex = polysTex = lines = rectsUntex = rectsTex = 0;
         fastFills = blitVV = cpuUploads = totalVerts = batches = 0;
+        batchesOpaque = batchesSemiTrans = 0;
     }
     void dump(PCSX::GPU::Display &disp) {
         frameNum++;
         if (!enabled || (frameNum % logInterval != 0)) { reset(); return; }
         fprintf(stderr, "[GPU f%d] en=%d d=%d start=(%d,%d) sz=(%d,%d) | "
                 "poly:%d/%d line:%d rect:%d/%d fill:%d blit:%d upload:%d | "
-                "verts=%d batches=%d | scissor=(%d,%d,%d,%d)\n",
+                "verts=%d batches=%d (opaque:%d semi:%d) | scissor=(%d,%d,%d,%d)\n",
                 frameNum, disp.enabled, disp.info.depth,
                 disp.start.x(), disp.start.y(), disp.size.x(), disp.size.y(),
                 polysUntex, polysTex, lines, rectsUntex, rectsTex,
                 fastFills, blitVV, cpuUploads,
-                totalVerts, batches,
+                totalVerts, batches, batchesOpaque, batchesSemiTrans,
                 (int)scissorX, (int)scissorY, (int)scissorW, (int)scissorH);
         reset();
     }
@@ -430,7 +442,7 @@ int PCSX::MetalGPU::initBackend(UI *) {
 
     // --- Initial uniform state ---
     m_uniforms.drawOffsetX = 0.5f;
-    m_uniforms.drawOffsetY = -0.5f;
+    m_uniforms.drawOffsetY = 0.5f;
     m_uniforms.texWindowMaskX = ~0;
     m_uniforms.texWindowMaskY = ~0;
     m_uniforms.texWindowOffX = 0;
@@ -439,6 +451,8 @@ int PCSX::MetalGPU::initBackend(UI *) {
     m_uniforms.blendA = 0.0f;
     m_uniforms.blendOpaqueR = m_uniforms.blendOpaqueG = m_uniforms.blendOpaqueB = 1.0f;
     m_uniforms.blendOpaqueA = 0.0f;
+    m_uniforms.setMask = 0;
+    m_uniforms.checkMask = 0;
 
     m_gpustat = 0x14802000;
     return 0;
@@ -460,14 +474,23 @@ void PCSX::MetalGPU::syncVRAMTexture() {
     if (!m_syncVRAM || !m_mtl) return;
     m_syncVRAM = false;
 
-    // Convert RGBA8 render target → R16Uint sample texture entirely on GPU.
+    // Only sync the current draw area (scissor region) from RT → sample texture.
+    // This preserves CPU-uploaded data (CLUTs, textures) outside the draw area
+    // that may not be present in the RT (e.g., wiped by FastFill).
+    auto &sc = m_mtl->scissor;
+    if (sc.width == 0 || sc.height == 0) return;
+
     m_mtl->ensureNoRenderEncoder();
     m_mtl->ensureFrameCmdBuf();
     auto *enc = [m_mtl->frameCmdBuf computeCommandEncoder];
     [enc setComputePipelineState:m_mtl->syncComputePSO];
     [enc setTexture:m_mtl->vramRenderTarget atIndex:0];
     [enc setTexture:m_mtl->vramSampleTexture atIndex:1];
-    MTLSize gridSize = MTLSizeMake(c_vramWidth, c_vramHeight, 1);
+
+    // Pass scissor offset to the compute shader
+    uint32_t offset[2] = {(uint32_t)sc.x, (uint32_t)sc.y};
+    [enc setBytes:offset length:sizeof(offset) atIndex:0];
+    MTLSize gridSize = MTLSizeMake(sc.width, sc.height, 1);
     MTLSize threadgroupSize = MTLSizeMake(16, 16, 1);
     [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
     [enc endEncoding];
@@ -516,6 +539,9 @@ void PCSX::MetalGPU::renderBatch() {
 
     s_log.totalVerts += m_vertexCount;
     s_log.batches++;
+    if (m_lastTransparency == Transparency::Transparent) s_log.batchesSemiTrans++;
+    else s_log.batchesOpaque++;
+
     // Log first batch's vertex positions once per log interval
     if (s_log.batches == 1 && (s_log.frameNum % s_log.logInterval) >= s_log.logInterval - 1) {
         int n = std::min(m_vertexCount, 6);
@@ -653,7 +679,7 @@ void PCSX::MetalGPU::setDrawOffset(uint32_t cmd) {
     m_drawingOffset.x() = offsetX;
     m_drawingOffset.y() = offsetY;
     m_uniforms.drawOffsetX = (float)offsetX + 0.5f;
-    m_uniforms.drawOffsetY = (float)offsetY - 0.5f;
+    m_uniforms.drawOffsetY = (float)offsetY + 0.5f;
 }
 
 void PCSX::MetalGPU::setTexWindow(uint32_t cmd) {
@@ -713,11 +739,13 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
 
     Uniforms fillU = m_uniforms;
     fillU.drawOffsetX = 0.5f;
-    fillU.drawOffsetY = -0.5f;
+    fillU.drawOffsetY = 0.5f;
     fillU.blendR = fillU.blendG = fillU.blendB = 1.0f;
     fillU.blendA = 0.0f;
     fillU.blendOpaqueR = fillU.blendOpaqueG = fillU.blendOpaqueB = 1.0f;
     fillU.blendOpaqueA = 0.0f;
+    fillU.setMask = 0;    // FastFill ignores mask bit
+    fillU.checkMask = 0;
 
     [enc setVertexBytes:fillVerts length:sizeof(fillVerts) atIndex:0];
     [enc setVertexBytes:&fillU length:sizeof(fillU) atIndex:1];
@@ -728,6 +756,21 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [enc endEncoding];
 
+    // Update CPU-side 16-bit mirror
+    uint16_t col16 = ((uint32_t)(r * 31 + 0.5f))
+                   | ((uint32_t)(g * 31 + 0.5f) << 5)
+                   | ((uint32_t)(b * 31 + 0.5f) << 10);
+    for (unsigned row = 0; row < cmd->h; row++) {
+        unsigned dy = (cmd->y + row) & 0x1ff;
+        for (unsigned col = 0; col < cmd->w; col++) {
+            unsigned dx = (cmd->x + col) & 0x3ff;
+            m_vram16[dy * c_vramWidth + dx] = col16;
+        }
+    }
+
+    // Don't write to sample texture — the scissor-scoped sync will propagate
+    // the fill from the RT to the draw area of the sample. Writing here would
+    // wipe CLUT/texture data stored outside the draw area.
     m_syncVRAM = true;
 }
 
@@ -847,7 +890,11 @@ void PCSX::MetalGPU::write0(DrawingOffset *cmd) {
     uint32_t word = cmd->raw & 0x3fffff;
     if (word != m_lastDrawOffsetSetting) { m_updateDrawOffset = true; m_lastDrawOffsetSetting = word; }
 }
-void PCSX::MetalGPU::write0(MaskBit *) {}
+void PCSX::MetalGPU::write0(MaskBit *cmd) {
+    renderBatch();
+    m_uniforms.setMask = cmd->set ? 1 : 0;
+    m_uniforms.checkMask = cmd->check ? 1 : 0;
+}
 
 // --- Control commands -------------------------------------------------------
 void PCSX::MetalGPU::write1(CtrlReset *) { resetBackend(); }
@@ -953,6 +1000,11 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
         [cb commit];
         [cb waitUntilCompleted];
 
+        // Force alpha=1 so ImGui renders all pixels as fully opaque.
+        // The RT alpha stores PSX MSB (mask bit state) which is not display alpha.
+        auto *px = static_cast<uint8_t *>(staging.contents);
+        for (int i = 0; i < c_vramWidth * c_vramHeight; i++) px[i * 4 + 3] = 0xff;
+
         [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, c_vramWidth, c_vramHeight)
                                  mipmapLevel:0
                                    withBytes:staging.contents
@@ -988,7 +1040,7 @@ void PCSX::MetalGPU::resetBackend() {
     m_updateDrawOffset = false;
     m_syncVRAM = true;
     m_uniforms.drawOffsetX = 0.5f;
-    m_uniforms.drawOffsetY = -0.5f;
+    m_uniforms.drawOffsetY = 0.5f;
     clearVRAM();
 }
 
@@ -1032,6 +1084,7 @@ PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {
 void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_t *pixels, PartialUpdateVram) {
     s_log.cpuUploads++;
     if (!m_mtl || w <= 0 || h <= 0) return;
+
     renderBatch();
 
     // Update CPU-side raw 16-bit mirror (needed for 24-bit display decode)
@@ -1042,6 +1095,9 @@ void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_
             m_vram16[destY * c_vramWidth + destX] = pixels[row * w + col];
         }
     }
+
+    // Must commit pending GPU work before CPU writes to shared textures
+    m_mtl->commitAndWait();
 
     // Upload raw 16-bit directly to sample texture (R16Uint) — no conversion!
     [m_mtl->vramSampleTexture replaceRegion:MTLRegionMake2D(x, y, w, h)

@@ -315,10 +315,16 @@ int pcsxMain(int argc, char **argv) {
 
         if (args.get<bool>("openglgpu")) {
             emuSettings.get<PCSX::Emulator::SettingHardwareRenderer>() = true;
+#ifdef PCSX_METAL
+            emuSettings.get<PCSX::Emulator::SettingMetalRenderer>() = false;
+#endif
         }
 
         if (args.get<bool>("softgpu")) {
             emuSettings.get<PCSX::Emulator::SettingHardwareRenderer>() = false;
+#ifdef PCSX_METAL
+            emuSettings.get<PCSX::Emulator::SettingMetalRenderer>() = false;
+#endif
         }
 
 #ifdef PCSX_METAL

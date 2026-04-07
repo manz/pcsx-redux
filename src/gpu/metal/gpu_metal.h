@@ -34,10 +34,8 @@ class MetalGPU final : public GPU {
     MetalGPU();
     ~MetalGPU() override;
 
-    // Returns the display texture as an ImTextureID for ImGui::Image()
-    void* getDisplayTextureID();
-    // Returns display UVs accounting for 24-bit mode
-    void getDisplayUVs(float &u0, float &v0, float &u1, float &v1);
+    void *getDisplayTextureID() override;
+    void getDisplayUVs(float &u0, float &v0, float &u1, float &v1) override;
 
   private:
     int initBackend(UI *) override;
@@ -187,6 +185,8 @@ class MetalGPU final : public GPU {
         int32_t texWindowMaskX, texWindowMaskY, texWindowOffX, texWindowOffY;
         float blendR, blendG, blendB, blendA;           // per-primitive blend factors
         float blendOpaqueR, blendOpaqueG, blendOpaqueB, blendOpaqueA;
+        int32_t setMask;    // force MSB=1 on written pixels
+        int32_t checkMask;  // skip writes to pixels with MSB=1
     };
 
     // -----------------------------------------------------------------------

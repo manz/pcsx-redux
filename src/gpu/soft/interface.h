@@ -21,6 +21,9 @@
 
 #include "core/gpu.h"
 #include "gpu/soft/soft.h"
+#ifdef PCSX_METAL
+#include "gpu/soft/soft_metal.h"
+#endif
 
 namespace PCSX {
 
@@ -42,8 +45,18 @@ class impl final : public GPU, public SoftRenderer {
         clearVRAM();
         m_display.reset();
     }
-    GLuint getVRAMTexture() override { return m_vramTexture16; }
+    GLuint getVRAMTexture() override {
+#ifdef PCSX_METAL
+        return 0;
+#else
+        return m_vramTexture16;
+#endif
+    }
     void setLinearFiltering() override;
+#ifdef PCSX_METAL
+    void *getDisplayTextureID() override;
+    void getDisplayUVs(float &u0, float &v0, float &u1, float &v1) override;
+#endif
     void setCachedDithering(bool value) override {
         if (value) {
             enableCachedDithering();
@@ -84,8 +97,12 @@ class impl final : public GPU, public SoftRenderer {
 
     virtual ScreenShot takeScreenShot() override;
 
+#ifndef PCSX_METAL
     GLuint m_vramTexture16;
     GLuint m_vramTexture24;
+#else
+    SoftMetalDisplay *m_metalDisplay = nullptr;
+#endif
 
     UI *m_ui;
 

@@ -156,6 +156,7 @@ ifeq ($(UNAME_S),Darwin)
     SRCS += src/main/complain.mm third_party/clip/clip_osx.mm
 ifeq ($(PCSX_METAL),true)
     SRCS += src/gpu/metal/gpu_metal.mm
+    SRCS += src/gpu/soft/soft_metal.mm
     SRCS += src/gui/gui_metal.mm
     SRCS += src/gui/widgets/filedialog_metal.mm
     SRCS += third_party/imgui/backends/imgui_impl_metal.mm
