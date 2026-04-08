@@ -31,6 +31,10 @@
 void PCSX::Widgets::MemcardManager::initTextures() {
     // Initialize the OpenGL textures used for the icon images
     // This must only be called when our OpenGL context is set up
+#ifdef PCSX_METAL
+    // Skip GL texture init under Metal — icons use placeholder text
+    return;
+#endif
     glGenTextures(15, m_iconTextures);
     for (int i = 0; i < 15; i++) {
         glBindTexture(GL_TEXTURE_2D, m_iconTextures[i]);
@@ -330,6 +334,11 @@ bool PCSX::Widgets::MemcardManager::draw(GUI* gui, const char* title) {
 }
 
 void PCSX::Widgets::MemcardManager::drawIcon(const PCSX::SIO::McdBlock& block) {
+#ifdef PCSX_METAL
+    // Memory card icons use GL textures — skip under Metal to avoid null GL calls
+    ImGui::Text("[icon]");
+    return;
+#endif
     int currentFrame = 0;  // 1st frame = 0, 2nd frame = 1, 3rd frame = 2 and so on
     const auto texture = m_iconTextures[block.number - 1];
     glBindTexture(GL_TEXTURE_2D, texture);
