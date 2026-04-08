@@ -362,8 +362,9 @@ PCSX::MetalGPU::~MetalGPU() { shutdown(); }
 int PCSX::MetalGPU::initBackend(UI *) {
     // Read resolution scale from settings (clamp to 1/2/4)
     if (g_emulator) {
-        int s = g_emulator->settings.get<Emulator::SettingMetalResolutionScale>();
-        if (s >= 4) m_resolutionScale = 4;
+        int s = g_emulator->settings.get<Emulator::SettingMetalResolutionScale>().value;
+        if (s >= 8) m_resolutionScale = 8;
+        else if (s >= 4) m_resolutionScale = 4;
         else if (s >= 2) m_resolutionScale = 2;
         else m_resolutionScale = 1;
     }
