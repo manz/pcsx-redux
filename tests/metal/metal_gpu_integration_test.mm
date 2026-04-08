@@ -277,4 +277,166 @@ TEST_F(MetalGPUIntegrationTest, SotN_FullPipeline) {
         << "SotN gargoyle tile should produce many non-black pixels through the full pipeline. Got " << nonBlack;
 }
 
+// Double-buffer simulation: reproduces the SotN file select frame alternation.
+// Frame A: offset=(0,0), scissor=(0,0,384,240), draws gargoyle to top half
+// Frame B: offset=(0,256), scissor=(0,256,384,240), draws gargoyle to bottom half
+// Display alternates: Frame A shows bottom half, Frame B shows top half.
+// The gargoyle drawn in Frame A should persist in the top half when Frame B displays it.
+TEST_F(MetalGPUIntegrationTest, DoubleBuffer_GargoylePersistsAcrossFrames) {
+    // Upload CLUT at (256, 241) — between the two framebuffers
+    std::vector<uint16_t> clut(256);
+    clut[0] = 0x0000;
+    for (int i = 1; i < 256; i++) {
+        clut[i] = (i & 0x1f) | (((i >> 1) & 0x1f) << 5) | (((i >> 2) & 0x1f) << 10) | 0x8000;
+    }
+    upload(256, 241, 256, 1, clut.data());
+
+    // Upload 8bpp texture at page (704, 0)
+    std::vector<uint16_t> tex(64 * 240);
+    for (int y = 0; y < 240; y++)
+        for (int x = 0; x < 64; x++) {
+            uint8_t i0 = ((x * 2 + y) * 7 + 13) & 0xff;
+            uint8_t i1 = ((x * 2 + 1 + y) * 7 + 13) & 0xff;
+            if (i0 == 0) i0 = 1;
+            if (i1 == 0) i1 = 1;
+            tex[y * 64 + x] = i0 | (i1 << 8);
+        }
+    upload(704, 0, 64, 240, tex.data());
+
+    uint16_t cl = (256 / 16) | (241 << 6);
+
+    // === Frame A: draw gargoyle to TOP half ===
+    gpuDrawArea(0, 0, 383, 239);
+    gpuDrawOffset(0, 0);
+    gpuFastFill(0, 0, 384, 240, 0, 0, 0);
+
+    gpuTexturedQuad(0x808080,
+                    0, 0, 0, 0, cl,
+                    128, 0, 128, 0, 0x008b,
+                    0, 240, 0, 240,
+                    128, 240, 128, 240);
+    endFrame();
+
+    // Verify gargoyle is in top half after Frame A
+    auto vramA = readVRAM16();
+    int nonBlackTopA = 0;
+    for (int y = 10; y < 230; y++)
+        for (int x = 10; x < 118; x++)
+            if (vramA[y * W + x] != 0) nonBlackTopA++;
+    EXPECT_GT(nonBlackTopA, 10000)
+        << "Frame A: gargoyle should be in top half. Got " << nonBlackTopA;
+
+    // === Frame B: draw gargoyle to BOTTOM half, display top half ===
+    gpuDrawArea(0, 256, 383, 495);
+    gpuDrawOffset(0, 256);
+    gpuFastFill(0, 256, 384, 240, 0, 0, 0);
+
+    gpuTexturedQuad(0x808080,
+                    0, 0, 0, 0, cl,
+                    128, 0, 128, 0, 0x008b,
+                    0, 240, 0, 240,
+                    128, 240, 128, 240);
+    endFrame();
+
+    // Verify gargoyle is in BOTH halves
+    auto vramB = readVRAM16();
+
+    // Top half should STILL have the gargoyle from Frame A
+    int nonBlackTopB = 0;
+    for (int y = 10; y < 230; y++)
+        for (int x = 10; x < 118; x++)
+            if (vramB[y * W + x] != 0) nonBlackTopB++;
+    EXPECT_GT(nonBlackTopB, 10000)
+        << "Frame B: top half gargoyle from Frame A should persist. Got " << nonBlackTopB;
+
+    // Bottom half should have the new gargoyle from Frame B
+    int nonBlackBotB = 0;
+    for (int y = 266; y < 486; y++)
+        for (int x = 10; x < 118; x++)
+            if (vramB[y * W + x] != 0) nonBlackBotB++;
+    EXPECT_GT(nonBlackBotB, 10000)
+        << "Frame B: gargoyle should be in bottom half. Got " << nonBlackBotB;
+
+    // === Frame C: draw to top half AGAIN, display bottom half ===
+    // This simulates the steady-state alternation
+    gpuDrawArea(0, 0, 383, 239);
+    gpuDrawOffset(0, 0);
+    gpuFastFill(0, 0, 384, 240, 0, 0, 0);
+
+    gpuTexturedQuad(0x808080,
+                    0, 0, 0, 0, cl,
+                    128, 0, 128, 0, 0x008b,
+                    0, 240, 0, 240,
+                    128, 240, 128, 240);
+    endFrame();
+
+    // Top half should have fresh gargoyle, bottom should persist from Frame B
+    auto vramC = readVRAM16();
+    int nonBlackTopC = 0;
+    for (int y = 10; y < 230; y++)
+        for (int x = 10; x < 118; x++)
+            if (vramC[y * W + x] != 0) nonBlackTopC++;
+    EXPECT_GT(nonBlackTopC, 10000)
+        << "Frame C: fresh gargoyle in top half. Got " << nonBlackTopC;
+
+    int nonBlackBotC = 0;
+    for (int y = 266; y < 486; y++)
+        for (int x = 10; x < 118; x++)
+            if (vramC[y * W + x] != 0) nonBlackBotC++;
+    EXPECT_GT(nonBlackBotC, 10000)
+        << "Frame C: bottom gargoyle from Frame B should persist. Got " << nonBlackBotC;
+
+    // === Verify CLUT survived all 3 frames ===
+    EXPECT_NE(vramC[241 * W + 257], 0)
+        << "CLUT[1] should survive all 3 frames of double-buffered rendering";
+}
+
+// Same as above but with the EXACT SotN pattern where Frame A has NO gargoyle
+// (only UI), testing if the gargoyle from Frame B persists when displayed.
+TEST_F(MetalGPUIntegrationTest, DoubleBuffer_AsymmetricFrames) {
+    // Upload CLUT + texture
+    std::vector<uint16_t> clut(256);
+    clut[0] = 0x0000;
+    for (int i = 1; i < 256; i++)
+        clut[i] = (i & 0x1f) | (((i >> 1) & 0x1f) << 5) | 0x8000;
+    upload(256, 241, 256, 1, clut.data());
+
+    std::vector<uint16_t> tex(64 * 240);
+    for (int y = 0; y < 240; y++)
+        for (int x = 0; x < 64; x++) {
+            uint8_t i0 = ((x * 2 + y) * 7 + 13) & 0xff;
+            if (i0 == 0) i0 = 1;
+            uint8_t i1 = i0;
+            tex[y * 64 + x] = i0 | (i1 << 8);
+        }
+    upload(704, 0, 64, 240, tex.data());
+
+    uint16_t cl = (256 / 16) | (241 << 6);
+
+    // === Frame A: draw gargoyle + UI to TOP half ===
+    gpuDrawArea(0, 0, 383, 239);
+    gpuDrawOffset(0, 0);
+    gpuFastFill(0, 0, 384, 240, 0, 0, 0);
+    // Gargoyle
+    gpuTexturedQuad(0x808080, 0,0,0,0,cl, 128,0,128,0,0x008b, 0,240,0,240, 128,240,128,240);
+    endFrame();
+
+    // === Frame B: draw ONLY UI to BOTTOM half (no gargoyle) ===
+    gpuDrawArea(0, 256, 383, 495);
+    gpuDrawOffset(0, 256);
+    gpuFastFill(0, 256, 384, 240, 0, 0, 0);
+    // Small UI rect only — no gargoyle in this frame
+    gpuFastFill(100, 300, 100, 50, 0x40, 0x40, 0x80);
+    endFrame();
+
+    // Top half should STILL have gargoyle from Frame A
+    auto vram = readVRAM16();
+    int nonBlackTop = 0;
+    for (int y = 10; y < 230; y++)
+        for (int x = 10; x < 118; x++)
+            if (vram[y * W + x] != 0) nonBlackTop++;
+    EXPECT_GT(nonBlackTop, 10000)
+        << "Asymmetric: gargoyle in top half should persist after Frame B drew to bottom. Got " << nonBlackTop;
+}
+
 #endif  // PCSX_METAL
