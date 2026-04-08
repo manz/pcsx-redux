@@ -71,12 +71,9 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
 
     float x = float(in.position.x);
     float y = float(in.position.y);
-    // Scale NDC mapping by resolution factor: at 2x, the RT is 2048x1024
-    // so each PSX pixel maps to 2x2 RT pixels
-    float halfW = 512.0 * u.resScale;
-    float halfH = 256.0 * u.resScale;
-    float xx = (x + u.drawOffsetX) / halfW - 1.0;
-    float yy = (y + u.drawOffsetY) / -halfH + 1.0;
+    // NDC mapping is resolution-independent — the larger RT provides more pixels per NDC unit
+    float xx = (x + u.drawOffsetX) / 512.0 - 1.0;
+    float yy = (y + u.drawOffsetY) / -256.0 + 1.0;
 
     float red   = float(in.color & 0xffu);
     float green = float((in.color >> 8u) & 0xffu);
