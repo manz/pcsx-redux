@@ -60,8 +60,9 @@ struct Uniforms {
     int texWindowOffY;
     float blendR, blendG, blendB, blendA;
     float blendOpaqueR, blendOpaqueG, blendOpaqueB, blendOpaqueA;
-    int setMask;    // force MSB=1 on written pixels
-    int checkMask;  // skip writes to pixels with MSB=1
+    int setMask;
+    int checkMask;
+    float resScale;  // resolution scale factor (1.0, 2.0, 4.0)
 };
 
 vertex VertexOut vertexMain(VertexIn in [[stage_in]],
@@ -70,10 +71,12 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
 
     float x = float(in.position.x);
     float y = float(in.position.y);
-    float xx = (x + u.drawOffsetX) / 512.0 - 1.0;
-    // Metal NDC Y+ is down (top-left origin). Divide by -256 so VRAM Y=0
-    // maps to clip +1 (top) and Y=511 maps to clip -1 (bottom).
-    float yy = (y + u.drawOffsetY) / -256.0 + 1.0;
+    // Scale NDC mapping by resolution factor: at 2x, the RT is 2048x1024
+    // so each PSX pixel maps to 2x2 RT pixels
+    float halfW = 512.0 * u.resScale;
+    float halfH = 256.0 * u.resScale;
+    float xx = (x + u.drawOffsetX) / halfW - 1.0;
+    float yy = (y + u.drawOffsetY) / -halfH + 1.0;
 
     float red   = float(in.color & 0xffu);
     float green = float((in.color >> 8u) & 0xffu);
@@ -190,18 +193,32 @@ static NSString *const s_syncComputeSource = @R"MSL(
 #include <metal_stdlib>
 using namespace metal;
 
+struct SyncParams {
+    uint2 offset;  // native-resolution offset (scissor origin)
+    uint  scale;   // resolution scale factor
+};
+
 kernel void rgba8ToR16(texture2d<float, access::read>  src [[texture(0)]],
                        texture2d<uint, access::write>   dst [[texture(1)]],
-                       constant uint2 &offset [[buffer(0)]],
+                       constant SyncParams &params [[buffer(0)]],
                        uint2 gid [[thread_position_in_grid]]) {
-    uint2 pos = gid + offset;
-    if (pos.x >= 1024 || pos.y >= 512) return;
-    float4 c = src.read(pos);
+    // gid is in NATIVE resolution space
+    uint2 nativePos = gid + params.offset;
+    if (nativePos.x >= 1024 || nativePos.y >= 512) return;
+
+    // Read from scaled RT: box filter SxS pixels into one value
+    uint S = params.scale;
+    float4 c = float4(0);
+    for (uint dy = 0; dy < S; dy++)
+        for (uint dx = 0; dx < S; dx++)
+            c += src.read(nativePos * S + uint2(dx, dy));
+    c /= float(S * S);
+
     uint r = uint(c.r * 31.0 + 0.5);
     uint g = uint(c.g * 31.0 + 0.5);
     uint b = uint(c.b * 31.0 + 0.5);
     uint a = uint(ceil(c.a));
-    dst.write(uint4(r | (g << 5) | (b << 10) | (a << 15), 0, 0, 0), pos);
+    dst.write(uint4(r | (g << 5) | (b << 10) | (a << 15), 0, 0, 0), nativePos);
 }
 )MSL";
 
@@ -220,7 +237,7 @@ struct PCSX::MetalGPU::MetalObjects {
     id<MTLRenderPipelineState>  psoBlendAdd = nil;
     id<MTLRenderPipelineState>  psoBlendRevSub = nil;
     id<MTLComputePipelineState> syncComputePSO = nil;     // RGBA8 → R16Uint conversion
-    MTLScissorRect              scissor = {0, 0, 1024, 512};
+    MTLScissorRect              scissor = {0, 0, 1024, 512};  // overwritten by updateDrawArea
     bool                        display24bit = false;
 
     // Per-frame command buffer — created at frame start, committed at vblank.
@@ -349,30 +366,26 @@ int PCSX::MetalGPU::initBackend(UI *) {
     if (!m_mtl->device) { g_system->message("Metal GPU: no device\n"); return -1; }
     m_mtl->commandQueue = [m_mtl->device newCommandQueue];
 
-    // --- VRAM textures (render target + sample copy) ---
+    // --- VRAM textures ---
+    // Render target: RGBA8 at scaled resolution (geometry renders here)
+    int sw = scaledWidth(), sh = scaledHeight();
     auto *texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                      width:c_vramWidth
-                                                                     height:c_vramHeight
-                                                                  mipmapped:NO];
+                                                                      width:sw height:sh mipmapped:NO];
     texDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     texDesc.storageMode = MTLStorageModeShared;
     m_mtl->vramRenderTarget = [m_mtl->device newTextureWithDescriptor:texDesc];
 
-    // Sample texture: R16Uint stores raw 16-bit PSX pixels.
-    // No float conversion — the shader reads uint and extracts bytes/nibbles directly.
+    // Sample texture: R16Uint at NATIVE resolution (texture/CLUT reads)
+    // This is the unscaled domain — always 1024x512 regardless of scale factor
     auto *sampleDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Uint
-                                                                         width:c_vramWidth
-                                                                        height:c_vramHeight
-                                                                     mipmapped:NO];
+                                                                         width:c_vramWidth height:c_vramHeight mipmapped:NO];
     sampleDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     sampleDesc.storageMode = MTLStorageModeShared;
     m_mtl->vramSampleTexture = [m_mtl->device newTextureWithDescriptor:sampleDesc];
 
-    // Display texture for 24-bit decode (shared storage so CPU can write)
+    // Display texture at scaled resolution
     auto *displayDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                          width:c_vramWidth
-                                                                         height:c_vramHeight
-                                                                      mipmapped:NO];
+                                                                          width:sw height:sh mipmapped:NO];
     displayDesc.usage = MTLTextureUsageShaderRead;
     displayDesc.storageMode = MTLStorageModeShared;
     m_mtl->displayTexture = [m_mtl->device newTextureWithDescriptor:displayDesc];
@@ -457,6 +470,7 @@ int PCSX::MetalGPU::initBackend(UI *) {
     m_uniforms.blendOpaqueA = 0.0f;
     m_uniforms.setMask = 0;
     m_uniforms.checkMask = 0;
+    m_uniforms.resScale = (float)m_resolutionScale;
 
     m_gpustat = 0x14802000;
     return 0;
@@ -491,10 +505,15 @@ void PCSX::MetalGPU::syncVRAMTexture() {
     [enc setTexture:m_mtl->vramRenderTarget atIndex:0];
     [enc setTexture:m_mtl->vramSampleTexture atIndex:1];
 
-    // Pass scissor offset to the compute shader
-    uint32_t offset[2] = {(uint32_t)sc.x, (uint32_t)sc.y};
-    [enc setBytes:offset length:sizeof(offset) atIndex:0];
-    MTLSize gridSize = MTLSizeMake(sc.width, sc.height, 1);
+    // Pass sync params: native-resolution offset + scale factor
+    // The scissor is in SCALED coords, convert back to native for the compute shader
+    int S = m_resolutionScale;
+    struct { uint32_t offX, offY, scale; } syncParams = {
+        (uint32_t)(sc.x / S), (uint32_t)(sc.y / S), (uint32_t)S
+    };
+    [enc setBytes:&syncParams length:sizeof(syncParams) atIndex:0];
+    // Dispatch in NATIVE resolution — each thread handles one native pixel (box-filtering SxS scaled pixels)
+    MTLSize gridSize = MTLSizeMake(sc.width / S, sc.height / S, 1);
     MTLSize threadgroupSize = MTLSizeMake(16, 16, 1);
     [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
     [enc endEncoding];
@@ -503,6 +522,50 @@ void PCSX::MetalGPU::syncVRAMTexture() {
 // ---------------------------------------------------------------------------
 // renderBatch — flush accumulated vertices to GPU
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Block atlas methods (per-block VRAM domain ownership)
+// ---------------------------------------------------------------------------
+PCSX::MetalGPU::BlockDomain PCSX::MetalGPU::getBlockDomain(int bx, int by) const {
+    int idx = by * c_blocksX + bx;
+    return static_cast<BlockDomain>((m_blockAtlas[idx / 4] >> ((idx % 4) * 2)) & 3);
+}
+
+void PCSX::MetalGPU::setBlockDomain(int bx, int by, BlockDomain d) {
+    int idx = by * c_blocksX + bx;
+    int shift = (idx % 4) * 2;
+    m_blockAtlas[idx / 4] = (m_blockAtlas[idx / 4] & ~(3 << shift)) | (static_cast<uint8_t>(d) << shift);
+}
+
+void PCSX::MetalGPU::markBlocksScaled(int x, int y, int w, int h) {
+    int bx0 = x / c_blockSize, by0 = y / c_blockSize;
+    int bx1 = (x + w + c_blockSize - 1) / c_blockSize;
+    int by1 = (y + h + c_blockSize - 1) / c_blockSize;
+    bx1 = std::min(bx1, c_blocksX);
+    by1 = std::min(by1, c_blocksY);
+    for (int by = by0; by < by1; by++)
+        for (int bx = bx0; bx < bx1; bx++)
+            setBlockDomain(bx, by, BlockDomain::ScaledOnly);
+}
+
+void PCSX::MetalGPU::markBlocksUnscaled(int x, int y, int w, int h) {
+    int bx0 = x / c_blockSize, by0 = y / c_blockSize;
+    int bx1 = (x + w + c_blockSize - 1) / c_blockSize;
+    int by1 = (y + h + c_blockSize - 1) / c_blockSize;
+    bx1 = std::min(bx1, c_blocksX);
+    by1 = std::min(by1, c_blocksY);
+    for (int by = by0; by < by1; by++)
+        for (int bx = bx0; bx < bx1; bx++)
+            setBlockDomain(bx, by, BlockDomain::UnscaledOnly);
+}
+
+void PCSX::MetalGPU::resolveScaledToUnscaled(int x, int y, int w, int h) {
+    // TODO: compute shader to downsample RT blocks → R16Uint
+}
+
+void PCSX::MetalGPU::resolveUnscaledToScaled(int x, int y, int w, int h) {
+    // TODO: compute shader to upscale R16Uint blocks → RT (nearest neighbor)
+}
+
 void PCSX::MetalGPU::commitAndReclaimVertexBuffer() {
     if (m_mtl) m_mtl->commitAndWait();
 }
@@ -680,7 +743,8 @@ void PCSX::MetalGPU::updateDrawArea() {
     if (top < 0) { height += top; top = 0; }
     if (width < 0) width = 0;
     if (height < 0) height = 0;
-    m_mtl->scissor = {(NSUInteger)left, (NSUInteger)top, (NSUInteger)width, (NSUInteger)height};
+    int S = m_resolutionScale;
+    m_mtl->scissor = {(NSUInteger)(left * S), (NSUInteger)(top * S), (NSUInteger)(width * S), (NSUInteger)(height * S)};
     s_log.scissorX = left; s_log.scissorY = top; s_log.scissorW = width; s_log.scissorH = height;
 }
 
@@ -764,7 +828,7 @@ void PCSX::MetalGPU::write0(FastFill *cmd) {
     [enc setVertexBytes:&fillU length:sizeof(fillU) atIndex:1];
     [enc setFragmentBytes:&fillU length:sizeof(fillU) atIndex:1];
     [enc setFragmentTexture:m_mtl->vramSampleTexture atIndex:0];
-    MTLScissorRect fullScissor = {0, 0, (NSUInteger)c_vramWidth, (NSUInteger)c_vramHeight};
+    MTLScissorRect fullScissor = {0, 0, (NSUInteger)scaledWidth(), (NSUInteger)scaledHeight()};
     [enc setScissorRect:fullScissor];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [enc endEncoding];
@@ -1010,27 +1074,27 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
         // Blit VRAM render target → display texture for ImGui.
         // The frame command buffer was already committed above, so the render target
         // has all the frame's draws. Use a new command buffer for the readback.
-        constexpr size_t vramBytes = c_vramWidth * c_vramHeight * 4;
+        int sw = scaledWidth(), sh = scaledHeight();
+        size_t vramBytes = sw * sh * 4;
         auto *staging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
         auto *cb = [m_mtl->commandQueue commandBuffer];
         auto *blit = [cb blitCommandEncoder];
         [blit copyFromTexture:m_mtl->vramRenderTarget sourceSlice:0 sourceLevel:0
-                 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(c_vramWidth, c_vramHeight, 1)
-                   toBuffer:staging destinationOffset:0 destinationBytesPerRow:c_vramWidth * 4
+                 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(sw, sh, 1)
+                   toBuffer:staging destinationOffset:0 destinationBytesPerRow:sw * 4
           destinationBytesPerImage:vramBytes];
         [blit endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
 
         // Force alpha=1 so ImGui renders all pixels as fully opaque.
-        // The RT alpha stores PSX MSB (mask bit state) which is not display alpha.
         auto *px = static_cast<uint8_t *>(staging.contents);
-        for (int i = 0; i < c_vramWidth * c_vramHeight; i++) px[i * 4 + 3] = 0xff;
+        for (int i = 0; i < sw * sh; i++) px[i * 4 + 3] = 0xff;
 
-        [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, c_vramWidth, c_vramHeight)
+        [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, sw, sh)
                                  mipmapLevel:0
                                    withBytes:staging.contents
-                                 bytesPerRow:c_vramWidth * 4];
+                                 bytesPerRow:sw * 4];
     }
 }
 
@@ -1074,28 +1138,38 @@ PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {
     renderBatch();
     m_mtl->commitAndWait();  // ensure all GPU work is done before readback
 
-    constexpr size_t vramBytes = c_vramWidth * c_vramHeight * 4;  // RGBA8
-    auto *staging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
+    // Do a full-VRAM sync: downsample the entire scaled RT to native R16Uint
+    m_mtl->ensureNoRenderEncoder();
+    m_mtl->ensureFrameCmdBuf();
+    auto *enc = [m_mtl->frameCmdBuf computeCommandEncoder];
+    [enc setComputePipelineState:m_mtl->syncComputePSO];
+    [enc setTexture:m_mtl->vramRenderTarget atIndex:0];
+    [enc setTexture:m_mtl->vramSampleTexture atIndex:1];
+    struct { uint32_t offX, offY, scale; } syncParams = {0, 0, (uint32_t)m_resolutionScale};
+    [enc setBytes:&syncParams length:sizeof(syncParams) atIndex:0];
+    MTLSize gridSize = MTLSizeMake(c_vramWidth, c_vramHeight, 1);
+    MTLSize tgSize = MTLSizeMake(16, 16, 1);
+    [enc dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+    [enc endEncoding];
+    m_mtl->commitAndWait();
+
+    constexpr size_t pixCount = c_vramWidth * c_vramHeight;
+    constexpr size_t sampleBytes = pixCount * 2;
+    auto *staging = [m_mtl->device newBufferWithLength:sampleBytes options:MTLResourceStorageModeShared];
 
     auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
     auto *blit = [cmdBuf blitCommandEncoder];
-    [blit copyFromTexture:m_mtl->vramRenderTarget
+    [blit copyFromTexture:m_mtl->vramSampleTexture
               sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
                sourceSize:MTLSizeMake(c_vramWidth, c_vramHeight, 1)
-                 toBuffer:staging destinationOffset:0 destinationBytesPerRow:c_vramWidth * 4
-      destinationBytesPerImage:vramBytes];
+                 toBuffer:staging destinationOffset:0 destinationBytesPerRow:c_vramWidth * 2
+      destinationBytesPerImage:sampleBytes];
     [blit endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
 
-    // Convert RGBA8 → 16-bit (1555)
-    constexpr size_t pixCount = c_vramWidth * c_vramHeight;
-    auto *rgba = (const uint8_t *)staging.contents;
     auto *out16 = new uint16_t[pixCount];
-    for (size_t i = 0; i < pixCount; i++) {
-        uint8_t r = rgba[i * 4 + 0], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
-        out16[i] = ((r * 31 + 127) / 255) | (((g * 31 + 127) / 255) << 5) | (((b * 31 + 127) / 255) << 10) | ((a >> 7) << 15);
-    }
+    memcpy(out16, staging.contents, sampleBytes);
 
     Slice slice;
     slice.acquire(std::string(reinterpret_cast<const char *>(out16), pixCount * 2));
@@ -1127,25 +1201,33 @@ void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_
                                   withBytes:pixels
                                 bytesPerRow:w * sizeof(uint16_t)];
 
-    // Also upload RGBA8 version to render target (for display readback)
-    std::vector<uint32_t> rgba(w * h);
-    for (int i = 0; i < w * h; i++) {
-        uint16_t px = pixels[i];
-        uint8_t r = ((px >>  0) & 0x1f) * 255 / 31;
-        uint8_t g = ((px >>  5) & 0x1f) * 255 / 31;
-        uint8_t b = ((px >> 10) & 0x1f) * 255 / 31;
-        uint8_t a = (px & 0x8000) ? 0xff : 0x00;
-        rgba[i] = r | (g << 8) | (b << 16) | (a << 24);
+    // Also upload RGBA8 version to render target at SCALED resolution
+    int S = m_resolutionScale;
+    int sw = w * S, sh = h * S;
+    std::vector<uint32_t> rgba(sw * sh);
+    for (int ny = 0; ny < h; ny++) {
+        for (int nx = 0; nx < w; nx++) {
+            uint16_t px = pixels[ny * w + nx];
+            uint8_t r = ((px >>  0) & 0x1f) * 255 / 31;
+            uint8_t g = ((px >>  5) & 0x1f) * 255 / 31;
+            uint8_t b = ((px >> 10) & 0x1f) * 255 / 31;
+            uint8_t a = (px & 0x8000) ? 0xff : 0x00;
+            uint32_t val = r | (g << 8) | (b << 16) | (a << 24);
+            // Fill SxS block in scaled buffer
+            for (int dy = 0; dy < S; dy++)
+                for (int dx = 0; dx < S; dx++)
+                    rgba[(ny * S + dy) * sw + (nx * S + dx)] = val;
+        }
     }
     size_t byteSize = rgba.size() * 4;
     auto *staging = [m_mtl->device newBufferWithBytes:rgba.data() length:byteSize options:MTLResourceStorageModeShared];
     m_mtl->ensureNoRenderEncoder();
     m_mtl->ensureFrameCmdBuf();
     auto *blit = [m_mtl->frameCmdBuf blitCommandEncoder];
-    [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:w * 4 sourceBytesPerImage:byteSize
-               sourceSize:MTLSizeMake(w, h, 1)
+    [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:sw * 4 sourceBytesPerImage:byteSize
+               sourceSize:MTLSizeMake(sw, sh, 1)
                toTexture:m_mtl->vramRenderTarget destinationSlice:0 destinationLevel:0
-        destinationOrigin:MTLOriginMake(x, y, 0)];
+        destinationOrigin:MTLOriginMake(x * S, y * S, 0)];
     [blit endEncoding];
 
     m_syncVRAM = true;

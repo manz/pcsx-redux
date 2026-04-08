@@ -187,13 +187,42 @@ class MetalGPU final : public GPU {
         float blendOpaqueR, blendOpaqueG, blendOpaqueB, blendOpaqueA;
         int32_t setMask;    // force MSB=1 on written pixels
         int32_t checkMask;  // skip writes to pixels with MSB=1
+        float resScale;     // resolution scale factor (1.0, 2.0, 4.0)
     };
+
+    // -----------------------------------------------------------------------
+    // Resolution scaling (parallel-psx style dual-domain)
+    // -----------------------------------------------------------------------
+    static constexpr int c_vramWidth = 1024;   // native PSX VRAM width
+    static constexpr int c_vramHeight = 512;   // native PSX VRAM height
+
+    int m_resolutionScale = 2;  // 1x, 2x, 4x — TODO: make configurable
+    int scaledWidth() const { return c_vramWidth * m_resolutionScale; }
+    int scaledHeight() const { return c_vramHeight * m_resolutionScale; }
+
+    // Per-block VRAM domain ownership
+    // Each 8x8 native-resolution block tracks which domain is authoritative
+    static constexpr int c_blockSize = 8;
+    static constexpr int c_blocksX = c_vramWidth / c_blockSize;   // 128
+    static constexpr int c_blocksY = c_vramHeight / c_blockSize;  // 64
+    enum class BlockDomain : uint8_t {
+        UnscaledOnly = 0,       // R16Uint is authoritative (CPU upload, no GPU draw)
+        ScaledOnly = 1,         // RT is authoritative (GPU draw, not yet resolved)
+        BothPreferScaled = 2,   // Both valid, use scaled for reads
+        BothPreferUnscaled = 3  // Both valid, use unscaled for reads
+    };
+    static constexpr int c_blockAtlasSize = (c_blocksX * c_blocksY + 3) / 4;
+    std::array<uint8_t, c_blockAtlasSize> m_blockAtlas{};
+    BlockDomain getBlockDomain(int bx, int by) const;
+    void setBlockDomain(int bx, int by, BlockDomain d);
+    void markBlocksScaled(int x, int y, int w, int h);
+    void markBlocksUnscaled(int x, int y, int w, int h);
+    void resolveScaledToUnscaled(int x, int y, int w, int h);
+    void resolveUnscaledToScaled(int x, int y, int w, int h);
 
     // -----------------------------------------------------------------------
     // Rendering helpers
     // -----------------------------------------------------------------------
-    static constexpr int c_vramWidth = 1024;
-    static constexpr int c_vramHeight = 512;
     static constexpr int c_vertexBufferSize = 0x100000;
 
     enum class Transparency { Opaque, Transparent };

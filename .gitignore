@@ -131,3 +131,7 @@ luacov.stats.out
 /*.AppImage
 /*.AppImage.zsyncgpu_capture.bin
 pcsx-redux-tests
+*.o
+gpu_capture.bin
+pcsx-redux-tests
+tests/metal/output/
