@@ -521,33 +521,21 @@ TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
         upload(px, 0, 64, 240, tex.data());
     }
 
-    // Replay chain DMA + GP1 commands to find which GP1 wipes the gargoyle
-    int opIdx = 0;
+    // Replay ALL commands without intermediate flushes
     for (int i = 0; i < s_sotnFrameCount; i++) {
         const auto &op = s_sotnFrame[i];
         switch (op.type) {
+            case 'D': gpu->writeData(op.data[0]); break;
+            case 'S': gpu->writeStatus(op.data[0]); break;
             case 'C':
                 for (int j = 0; j < op.count; j++)
                     gpu->writeData(op.data[j]);
                 break;
-            case 'S':
-                fprintf(stderr, "[GP1] writeStatus(%08x) before chain op %d\n", op.data[0], opIdx);
-                gpu->writeStatus(op.data[0]);
-                break;
-            case 'D':
-                gpu->writeData(op.data[0]);
-                break;
-            case 'A':
-                gpu->directDMAWrite(op.data, op.count, 0);
-                break;
+            case 'A': gpu->directDMAWrite(op.data, op.count, 0); break;
         }
-        if (op.type == 'C') opIdx++;
-        if (opIdx > 14$limit) break;
     }
 
-    // Check vertex count by reading VRAM before endFrame
-    // First, let's see what the FastFill produced
-    endFrame();
+    // Skip endFrame — just read VRAM directly (this forces renderBatch + commit)
     auto vramMid = readVRAM16();
     int fastfillBlack = 0;
     for (int y = 0; y < 240; y++)
@@ -592,8 +580,13 @@ TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
         for (int x = 0; x < 384; x++)
             if (vram[y * W + x] != 0) totalNonBlack++;
 
-    fprintf(stderr, "[REPLAY] Non-black pixels in framebuffer: %d (gargoyle area: %d)\n",
-            totalNonBlack, nonBlack);
+    // Find WHERE the non-black pixels are
+    int firstX = -1, firstY = -1;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            if (vram[y * W + x] != 0 && firstX == -1) { firstX = x; firstY = y; }
+    fprintf(stderr, "[REPLAY] Non-black pixels in framebuffer: %d (gargoyle area: %d) first at (%d,%d)\n",
+            totalNonBlack, nonBlack, firstX, firstY);
 }
 
 #endif  // PCSX_METAL
