@@ -360,6 +360,14 @@ PCSX::MetalGPU::~MetalGPU() { shutdown(); }
 // Init / Shutdown
 // ---------------------------------------------------------------------------
 int PCSX::MetalGPU::initBackend(UI *) {
+    // Read resolution scale from settings (clamp to 1/2/4)
+    if (g_emulator) {
+        int s = g_emulator->settings.get<Emulator::SettingMetalResolutionScale>();
+        if (s >= 4) m_resolutionScale = 4;
+        else if (s >= 2) m_resolutionScale = 2;
+        else m_resolutionScale = 1;
+    }
+
     m_mtl = new MetalObjects();
     m_mtl->vertexWriteOffsetPtr = &m_vertexWriteOffset;
     m_mtl->device = MTLCreateSystemDefaultDevice();

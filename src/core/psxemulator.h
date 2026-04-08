@@ -180,6 +180,7 @@ class Emulator {
     typedef Setting<bool, TYPESTRING("HardwareRenderer"), false> SettingHardwareRenderer;
 #ifdef PCSX_METAL
     typedef Setting<bool, TYPESTRING("MetalRenderer"), false> SettingMetalRenderer;
+    typedef Setting<int, TYPESTRING("MetalResolutionScale"), 1> SettingMetalResolutionScale;
 #endif
     typedef Setting<bool, TYPESTRING("ShownAutoUpdateConfig"), false> SettingShownAutoUpdateConfig;
     typedef Setting<bool, TYPESTRING("AutoUpdate"), false> SettingAutoUpdate;
@@ -204,7 +205,7 @@ class Emulator {
              SettingMcd2Pocketstation, SettingBiosBrowsePath, SettingEXP1Filepath, SettingEXP1BrowsePath,
              SettingPIOConnected, SettingMapBrowsePath, SettingOpenDialogFavorites
 #ifdef PCSX_METAL
-             , SettingMetalRenderer
+             , SettingMetalRenderer, SettingMetalResolutionScale
 #endif
              >
         settings;

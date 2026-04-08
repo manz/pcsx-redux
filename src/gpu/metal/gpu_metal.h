@@ -196,7 +196,7 @@ class MetalGPU final : public GPU {
     static constexpr int c_vramWidth = 1024;   // native PSX VRAM width
     static constexpr int c_vramHeight = 512;   // native PSX VRAM height
 
-    int m_resolutionScale = 2;  // 1x, 2x, 4x — TODO: make configurable
+    int m_resolutionScale = 1;  // set from SettingMetalResolutionScale in initBackend
     int scaledWidth() const { return c_vramWidth * m_resolutionScale; }
     int scaledHeight() const { return c_vramHeight * m_resolutionScale; }
 
