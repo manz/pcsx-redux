@@ -448,12 +448,15 @@ TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
     // We also need the texture data at pages (576-704, 0).
     // For now, pre-populate with test data so the quads produce visible output.
 
-    // Upload a CLUT at (256, 240) — matching the capture's VRAM_Write destination
+    // Upload CLUT at (256, 241) — the gargoyle quad's cl=0x3c50 decodes to (256,241)
+    // The capture shows VRAM_Write at (256,240), but the quads reference cl=0x3c50=(256,241)
+    // Upload to BOTH rows to be safe
     std::vector<uint16_t> clut(256);
     clut[0] = 0x0000;
     for (int i = 1; i < 256; i++)
         clut[i] = (i & 0x1f) | (((i*2) & 0x1f) << 5) | (((i*3) & 0x1f) << 10) | 0x8000;
     upload(256, 240, 256, 1, clut.data());
+    upload(256, 241, 256, 1, clut.data());
 
     // Upload 8bpp texture data at pages 9,10,11 (X=576,640,704)
     for (int page = 0; page < 3; page++) {
@@ -471,6 +474,7 @@ TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
     }
 
     // Replay the captured frame commands
+    int writeDataCount = 0, chainCount = 0;
     for (int i = 0; i < s_sotnFrameCount; i++) {
         const auto &op = s_sotnFrame[i];
         switch (op.type) {
@@ -481,9 +485,9 @@ TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
                 gpu->writeStatus(op.data[0]);
                 break;
             case 'C':
-                // Chain DMA: feed words sequentially through writeData
-                for (int j = 0; j < op.count; j++)
-                    gpu->writeData(op.data[j]);
+                // Chain DMA: feed as a single buffer (like real DMA)
+                gpu->directDMAWrite(op.data, op.count, 0);
+                chainCount++;
                 break;
             case 'A':
                 // Direct DMA write
