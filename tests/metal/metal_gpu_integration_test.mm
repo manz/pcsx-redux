@@ -11,7 +11,60 @@
 #include <cstring>
 #include <vector>
 
+#include "core/psxemulator.h"
+#include "core/system.h"
 #include "gpu/metal/gpu_metal.h"
+
+// ===========================================================================
+// Minimal System stub for headless GPU testing
+// ===========================================================================
+class StubSystem : public PCSX::System {
+  public:
+    StubSystem() : m_stubArgs(s_args), m_args(m_stubArgs) {}
+    void softReset() override {}
+    void hardReset() override {}
+    void biosPutc(int) override {}
+    const PCSX::Arguments &getArgs() const override { return m_args; }
+    void printf(std::string &&) override {}
+    void log(PCSX::LogClass, std::string &&) override {}
+    void message(std::string &&) override {}
+    void luaMessage(const std::string &, bool) override {}
+    void update(bool) override {}
+    void close() override {}
+    void purgeAllEvents() override {}
+    void testQuit(int) override {}
+  private:
+    static inline int s_argc = 1;
+    static inline char *s_argv[] = {(char *)"test", nullptr};
+    static inline CommandLine::args s_args{1, s_argv};
+    PCSX::Arguments m_stubArgs;
+    const PCSX::Arguments &m_args;
+};
+
+// ===========================================================================
+// Global setup: create minimal System + Emulator so GPU globals work
+// ===========================================================================
+class MetalGPUTestEnvironment : public ::testing::Environment {
+  public:
+    void SetUp() override {
+        system = new StubSystem();
+        PCSX::g_system = system;
+        emulator = new PCSX::Emulator();
+        PCSX::g_emulator = emulator;
+    }
+    void TearDown() override {
+        PCSX::g_emulator = nullptr;
+        delete emulator;
+        PCSX::g_system = nullptr;
+        delete system;
+    }
+  private:
+    StubSystem *system = nullptr;
+    PCSX::Emulator *emulator = nullptr;
+};
+
+// Register the environment (gtest owns it)
+static auto *env = ::testing::AddGlobalTestEnvironment(new MetalGPUTestEnvironment());
 
 // ===========================================================================
 // Integration test fixture using the REAL MetalGPU via public GPU interface
@@ -25,8 +78,8 @@ class MetalGPUIntegrationTest : public ::testing::Test {
     void SetUp() override {
         gpu = PCSX::GPU::getMetal();
         ASSERT_NE(gpu, nullptr);
-        int ret = gpu->initBackend(nullptr);
-        ASSERT_EQ(ret, 0) << "MetalGPU initBackend failed";
+        int ret = gpu->init(nullptr);
+        ASSERT_EQ(ret, 0) << "MetalGPU init failed";
 
         // Set default draw area to full VRAM
         gpuDrawArea(0, 0, 1023, 511);
