@@ -129,4 +129,5 @@ luacov.stats.out
 /appimage-build
 /AppDir
 /*.AppImage
-/*.AppImage.zsync
+/*.AppImage.zsyncgpu_capture.bin
+pcsx-redux-tests
