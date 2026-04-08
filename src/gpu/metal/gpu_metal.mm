@@ -1147,6 +1147,29 @@ void PCSX::MetalGPU::resetBackend() {
 }
 
 GLuint PCSX::MetalGPU::getVRAMTexture() { return 0; }
+
+PCSX::GPU::ScreenShot PCSX::MetalGPU::takeScreenShot() {
+    ScreenShot ss;
+    ss.width = m_display.size.x();
+    ss.height = m_display.size.y();
+    ss.bpp = ScreenShot::BPP_16;
+    auto vram = getVRAM(Ownership::ACQUIRE);
+    auto *src = reinterpret_cast<const uint16_t *>(vram.data());
+    int startX = m_display.start.x();
+    int startY = m_display.start.y();
+    int w = ss.width, h = ss.height;
+    size_t size = w * h * 2;
+    char *pixels = reinterpret_cast<char *>(malloc(size));
+    for (int y = 0; y < h; y++) {
+        int srcY = (startY + y) & 511;
+        for (int x = 0; x < w; x++) {
+            int srcX = (startX + x) & 1023;
+            reinterpret_cast<uint16_t *>(pixels)[y * w + x] = src[srcY * c_vramWidth + srcX];
+        }
+    }
+    ss.data.acquire(pixels, size);
+    return ss;
+}
 void PCSX::MetalGPU::setLinearFiltering() {}
 
 PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {

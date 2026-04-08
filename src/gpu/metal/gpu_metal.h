@@ -50,6 +50,7 @@ class MetalGPU final : public GPU {
     void clearVRAM() override;
     void resetBackend() override;
     GLuint getVRAMTexture() override;
+    ScreenShot takeScreenShot() override;
     void setLinearFiltering() override;
     Slice getVRAM(Ownership) override;
     void partialUpdateVRAM(int x, int y, int w, int h, const uint16_t *pixels, PartialUpdateVram) override;
