@@ -243,6 +243,7 @@ struct PCSX::MetalGPU::MetalObjects {
         }
     }
 
+    int *vertexWriteOffsetPtr = nullptr;  // set by MetalGPU after init
     void commitAndWait() {
         ensureNoRenderEncoder();
         if (frameCmdBuf) {
@@ -250,6 +251,8 @@ struct PCSX::MetalGPU::MetalObjects {
             [frameCmdBuf waitUntilCompleted];
             frameCmdBuf = nil;
         }
+        // Reset vertex write offset — GPU has consumed all batches
+        if (vertexWriteOffsetPtr) *vertexWriteOffsetPtr = 0;
     }
 };
 
@@ -341,6 +344,7 @@ PCSX::MetalGPU::~MetalGPU() { shutdown(); }
 // ---------------------------------------------------------------------------
 int PCSX::MetalGPU::initBackend(UI *) {
     m_mtl = new MetalObjects();
+    m_mtl->vertexWriteOffsetPtr = &m_vertexWriteOffset;
     m_mtl->device = MTLCreateSystemDefaultDevice();
     if (!m_mtl->device) { g_system->message("Metal GPU: no device\n"); return -1; }
     m_mtl->commandQueue = [m_mtl->device newCommandQueue];
@@ -499,6 +503,10 @@ void PCSX::MetalGPU::syncVRAMTexture() {
 // ---------------------------------------------------------------------------
 // renderBatch — flush accumulated vertices to GPU
 // ---------------------------------------------------------------------------
+void PCSX::MetalGPU::commitAndReclaimVertexBuffer() {
+    if (m_mtl) m_mtl->commitAndWait();
+}
+
 void PCSX::MetalGPU::renderBatch() {
     if (m_vertexCount <= 0 || !m_mtl) return;
 
@@ -509,8 +517,12 @@ void PCSX::MetalGPU::renderBatch() {
         setDrawOffset(m_lastDrawOffsetSetting);
     }
 
-    // Upload vertices to the streaming buffer
-    memcpy(m_mtl->vertexBuffer.contents, m_vertices.data(), m_vertexCount * sizeof(Vertex));
+    // Upload vertices to the streaming buffer at the current write offset
+    // Each batch occupies a different region so deferred GPU execution
+    // sees the correct vertices for each render pass.
+    size_t batchByteOffset = m_vertexWriteOffset * sizeof(Vertex);
+    memcpy((uint8_t *)m_mtl->vertexBuffer.contents + batchByteOffset,
+           m_vertices.data(), m_vertexCount * sizeof(Vertex));
 
     // Select pipeline based on transparency mode
     id<MTLRenderPipelineState> pso = m_mtl->psoOpaque;
@@ -529,7 +541,7 @@ void PCSX::MetalGPU::renderBatch() {
 
     auto *enc = [m_mtl->frameCmdBuf renderCommandEncoderWithDescriptor:rpd];
     [enc setRenderPipelineState:pso];
-    [enc setVertexBuffer:m_mtl->vertexBuffer offset:0 atIndex:0];
+    [enc setVertexBuffer:m_mtl->vertexBuffer offset:batchByteOffset atIndex:0];
     [enc setVertexBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
     [enc setFragmentBytes:&m_uniforms length:sizeof(m_uniforms) atIndex:1];
     [enc setFragmentTexture:m_mtl->vramSampleTexture atIndex:0];
@@ -550,6 +562,7 @@ void PCSX::MetalGPU::renderBatch() {
         fprintf(stderr, "\n");
     }
     m_syncVRAM = true;  // next batch must re-sync sample texture
+    m_vertexWriteOffset += m_vertexCount;
     m_vertexCount = 0;
 }
 

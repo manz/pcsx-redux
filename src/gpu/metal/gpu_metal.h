@@ -200,8 +200,14 @@ class MetalGPU final : public GPU {
 
     template <int count>
     void maybeRenderBatch() {
-        if ((m_vertexCount + count) >= c_vertexBufferSize) renderBatch();
+        if ((m_vertexWriteOffset + m_vertexCount + count) >= c_vertexBufferSize) {
+            renderBatch();
+            if ((m_vertexWriteOffset + count) >= c_vertexBufferSize) {
+                commitAndReclaimVertexBuffer();
+            }
+        }
     }
+    void commitAndReclaimVertexBuffer();
     void renderBatch();
     void syncVRAMTexture();
 
@@ -227,6 +233,7 @@ class MetalGPU final : public GPU {
 
     std::vector<Vertex> m_vertices;
     int m_vertexCount = 0;
+    int m_vertexWriteOffset = 0;  // offset into vertex buffer for next batch
     Uniforms m_uniforms{};
 
     int m_drawAreaLeft = 0, m_drawAreaRight = 0;

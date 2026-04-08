@@ -521,7 +521,7 @@ TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
         upload(px, 0, 64, 240, tex.data());
     }
 
-    // Replay ALL commands without intermediate flushes
+    // Replay ALL commands from capture array — identical to original but cleaner
     for (int i = 0; i < s_sotnFrameCount; i++) {
         const auto &op = s_sotnFrame[i];
         switch (op.type) {
