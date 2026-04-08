@@ -2280,19 +2280,10 @@ when changing this setting.)"));
         ImGuiHelpers::ShowHelpMarker(_(R"(Enables the Metal GPU renderer (macOS only).
 This is experimental and not fully implemented yet.
 Requires a restart when changing this setting.)"));
-        {
-            static const char *scaleLabels[] = {"1x (Native)", "2x (2048x1024)", "4x (4096x2048)", "8x (8192x4096)"};
-            static const int scaleValues[] = {1, 2, 4, 8};
-            int current = settings.get<Emulator::SettingMetalResolutionScale>().value;
-            int idx = (current >= 8) ? 3 : (current >= 4) ? 2 : (current >= 2) ? 1 : 0;
-            if (ImGui::Combo(_("Internal Resolution"), &idx, scaleLabels, 4)) {
-                settings.get<Emulator::SettingMetalResolutionScale>().value = scaleValues[idx];
-                changed = true;
-            }
-            ImGuiHelpers::ShowHelpMarker(_(R"(Renders geometry at higher internal resolution.
-Polygon edges become smoother. Textures remain at native resolution.
+        changed |= ImGui::SliderInt(_("Internal Resolution"), &settings.get<Emulator::SettingMetalResolutionScale>().value, 1, 8);
+        ImGuiHelpers::ShowHelpMarker(_(R"(Resolution multiplier (1/2/4/8). Renders geometry at higher
+internal resolution. Polygon edges become smoother.
 Requires a restart when changing this setting.)"));
-        }
 #endif
 
         if (memChanged) {

@@ -360,13 +360,15 @@ PCSX::MetalGPU::~MetalGPU() { shutdown(); }
 // Init / Shutdown
 // ---------------------------------------------------------------------------
 int PCSX::MetalGPU::initBackend(UI *) {
-    // Read resolution scale from settings (clamp to 1/2/4)
+    // Read resolution scale from settings
     if (g_emulator) {
         int s = g_emulator->settings.get<Emulator::SettingMetalResolutionScale>().value;
         if (s >= 8) m_resolutionScale = 8;
         else if (s >= 4) m_resolutionScale = 4;
         else if (s >= 2) m_resolutionScale = 2;
         else m_resolutionScale = 1;
+        fprintf(stderr, "[Metal] Resolution scale: setting=%d → using %dx (%dx%d RT)\n",
+                s, m_resolutionScale, scaledWidth(), scaledHeight());
     }
 
     m_mtl = new MetalObjects();
@@ -964,13 +966,14 @@ void PCSX::MetalGPU::write0(BlitVramVram *cmd) {
     m_mtl->ensureNoRenderEncoder();
     m_mtl->ensureFrameCmdBuf();
     auto *blit = [m_mtl->frameCmdBuf blitCommandEncoder];
+    int S = m_resolutionScale;
     [blit copyFromTexture:m_mtl->vramRenderTarget
               sourceSlice:0 sourceLevel:0
-             sourceOrigin:MTLOriginMake(cmd->sX, cmd->sY, 0)
-               sourceSize:MTLSizeMake(cmd->w, cmd->h, 1)
+             sourceOrigin:MTLOriginMake(cmd->sX * S, cmd->sY * S, 0)
+               sourceSize:MTLSizeMake(cmd->w * S, cmd->h * S, 1)
                 toTexture:m_mtl->vramRenderTarget
          destinationSlice:0 destinationLevel:0
-        destinationOrigin:MTLOriginMake(cmd->dX, cmd->dY, 0)];
+        destinationOrigin:MTLOriginMake(cmd->dX * S, cmd->dY * S, 0)];
     [blit endEncoding];
     m_syncVRAM = true;
 }
@@ -1015,17 +1018,19 @@ void* PCSX::MetalGPU::getDisplayTextureID() {
 }
 
 void PCSX::MetalGPU::getDisplayUVs(float &u0, float &v0, float &u1, float &v1) {
+    // Display texture is at scaled resolution — UVs must use scaled dimensions
+    float sw = float(scaledWidth());
+    float sh = float(scaledHeight());
+    int S = m_resolutionScale;
     if (m_mtl && m_mtl->display24bit) {
         u0 = 0.0f; v0 = 0.0f;
-        u1 = float(m_display.size.x()) / float(c_vramWidth);
-        v1 = float(m_display.size.y()) / float(c_vramHeight);
+        u1 = float(m_display.size.x() * S) / sw;
+        v1 = float(m_display.size.y() * S) / sh;
     } else {
-        // Use raw start/size integers to compute UVs directly,
-        // avoiding potential issues with startNormalized not being updated.
-        u0 = float(m_display.start.x()) / float(c_vramWidth);
-        v0 = float(m_display.start.y()) / float(c_vramHeight);
-        u1 = u0 + float(m_display.size.x()) / float(c_vramWidth);
-        v1 = v0 + float(m_display.size.y()) / float(c_vramHeight);
+        u0 = float(m_display.start.x() * S) / sw;
+        v0 = float(m_display.start.y() * S) / sh;
+        u1 = u0 + float(m_display.size.x() * S) / sw;
+        v1 = v0 + float(m_display.size.y() * S) / sh;
     }
 }
 

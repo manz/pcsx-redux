@@ -331,6 +331,10 @@ int pcsxMain(int argc, char **argv) {
         if (args.get<bool>("metalgpu")) {
             emuSettings.get<PCSX::Emulator::SettingMetalRenderer>() = true;
         }
+        auto resScale = args.get<int>("resolution");
+        if (resScale.has_value()) {
+            emuSettings.get<PCSX::Emulator::SettingMetalResolutionScale>().value = resScale.value();
+        }
 #endif
 
         if (args.get<bool>("kiosk")) {
