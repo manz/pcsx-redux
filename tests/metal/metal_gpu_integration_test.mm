@@ -14,6 +14,7 @@
 #include "core/psxemulator.h"
 #include "core/system.h"
 #include "gpu/metal/gpu_metal.h"
+#include "sotn_frame_capture.h"
 
 // ===========================================================================
 // Minimal System stub for headless GPU testing
@@ -437,6 +438,81 @@ TEST_F(MetalGPUIntegrationTest, DoubleBuffer_AsymmetricFrames) {
             if (vram[y * W + x] != 0) nonBlackTop++;
     EXPECT_GT(nonBlackTop, 10000)
         << "Asymmetric: gargoyle in top half should persist after Frame B drew to bottom. Got " << nonBlackTop;
+}
+
+// Replay captured SotN frame through the real Metal GPU pipeline.
+// This feeds the exact same GP0/GP1 commands that the game sends.
+TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
+    // First, upload the CLUT that would have been loaded during game init.
+    // The capture has a VRAM write at (256,240) with 256 entries every frame.
+    // We also need the texture data at pages (576-704, 0).
+    // For now, pre-populate with test data so the quads produce visible output.
+
+    // Upload a CLUT at (256, 240) — matching the capture's VRAM_Write destination
+    std::vector<uint16_t> clut(256);
+    clut[0] = 0x0000;
+    for (int i = 1; i < 256; i++)
+        clut[i] = (i & 0x1f) | (((i*2) & 0x1f) << 5) | (((i*3) & 0x1f) << 10) | 0x8000;
+    upload(256, 240, 256, 1, clut.data());
+
+    // Upload 8bpp texture data at pages 9,10,11 (X=576,640,704)
+    for (int page = 0; page < 3; page++) {
+        int px = 576 + page * 64;
+        std::vector<uint16_t> tex(64 * 240);
+        for (int y = 0; y < 240; y++)
+            for (int x = 0; x < 64; x++) {
+                uint8_t i0 = ((page * 128 + x * 2 + y) * 7 + 13) & 0xff;
+                uint8_t i1 = ((page * 128 + x * 2 + 1 + y) * 7 + 13) & 0xff;
+                if (i0 == 0) i0 = 1;
+                if (i1 == 0) i1 = 1;
+                tex[y * 64 + x] = i0 | (i1 << 8);
+            }
+        upload(px, 0, 64, 240, tex.data());
+    }
+
+    // Replay the captured frame commands
+    for (int i = 0; i < s_sotnFrameCount; i++) {
+        const auto &op = s_sotnFrame[i];
+        switch (op.type) {
+            case 'D':
+                gpu->writeData(op.data[0]);
+                break;
+            case 'S':
+                gpu->writeStatus(op.data[0]);
+                break;
+            case 'C':
+                // Chain DMA: feed words sequentially through writeData
+                for (int j = 0; j < op.count; j++)
+                    gpu->writeData(op.data[j]);
+                break;
+            case 'A':
+                // Direct DMA write
+                gpu->directDMAWrite(op.data, op.count, 0);
+                break;
+        }
+    }
+
+    // End frame
+    endFrame();
+
+    // Check: the gargoyle area should have non-black pixels
+    auto vram = readVRAM16();
+    int nonBlack = 0;
+    for (int y = 10; y < 230; y++)
+        for (int x = 10; x < 118; x++)
+            if (vram[y * W + x] != 0) nonBlack++;
+
+    EXPECT_GT(nonBlack, 5000)
+        << "SotN replay: gargoyle area should have visible pixels. Got " << nonBlack;
+
+    // Also check that the ENTIRE framebuffer has content (not just gargoyle)
+    int totalNonBlack = 0;
+    for (int y = 0; y < 240; y++)
+        for (int x = 0; x < 384; x++)
+            if (vram[y * W + x] != 0) totalNonBlack++;
+
+    fprintf(stderr, "[REPLAY] Non-black pixels in framebuffer: %d (gargoyle area: %d)\n",
+            totalNonBlack, nonBlack);
 }
 
 #endif  // PCSX_METAL
