@@ -440,6 +440,54 @@ TEST_F(MetalGPUIntegrationTest, DoubleBuffer_AsymmetricFrames) {
         << "Asymmetric: gargoyle in top half should persist after Frame B drew to bottom. Got " << nonBlackTop;
 }
 
+// Minimal 0x3C test: manually send one gouraud textured quad
+TEST_F(MetalGPUIntegrationTest, GouraudTexturedQuad_0x3C) {
+    // Upload CLUT at (256, 241)
+    std::vector<uint16_t> clut(256);
+    clut[0] = 0x0000;
+    for (int i = 1; i < 256; i++)
+        clut[i] = (i & 0x1f) | (((i*2) & 0x1f) << 5) | 0x8000;
+    upload(256, 241, 256, 1, clut.data());
+
+    // Upload 8bpp texture at (704, 0)
+    std::vector<uint16_t> tex(64 * 240, 0x0101);  // all index 1
+    upload(704, 0, 64, 240, tex.data());
+
+    // Setup
+    gpuDrawArea(0, 0, 383, 239);
+    gpuDrawOffset(0, 0);
+    gpuFastFill(0, 0, 384, 240, 0, 0, 0);
+
+    // Send GP0(3C) gouraud textured quad: 12 words
+    // Same format as SotN's gargoyle quad
+    uint32_t gouraudQuad[] = {
+        0x3c808080,       // cmd + color0
+        0x00000000,       // v0: x=0, y=0
+        0x3c500000,       // clut=0x3c50, u0=0, v0=0
+        0x00808080,       // color1
+        0x00000080,       // v1: x=128, y=0
+        0x008b0080,       // tpage=0x008b, u1=128, v1=0
+        0x00808080,       // color2
+        0x00f00000,       // v2: x=0, y=240
+        0x0000f000,       // u2=0, v2=240
+        0x00808080,       // color3
+        0x00f00080,       // v3: x=128, y=240
+        0x0000f080,       // u3=128, v3=240
+    };
+    for (auto w : gouraudQuad) gpu->writeData(w);
+
+    endFrame();
+
+    auto vram = readVRAM16();
+    int nonBlack = 0;
+    for (int y = 10; y < 230; y++)
+        for (int x = 10; x < 118; x++)
+            if (vram[y * W + x] != 0) nonBlack++;
+
+    fprintf(stderr, "[0x3C TEST] Non-black pixels: %d\n", nonBlack);
+    EXPECT_GT(nonBlack, 5000) << "Gouraud textured quad (0x3C) should produce visible pixels. Got " << nonBlack;
+}
+
 // Replay captured SotN frame through the real Metal GPU pipeline.
 // This feeds the exact same GP0/GP1 commands that the game sends.
 TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
@@ -473,34 +521,63 @@ TEST_F(MetalGPUIntegrationTest, SotN_ReplayCapturedFrame) {
         upload(px, 0, 64, 240, tex.data());
     }
 
-    // Replay the captured frame commands
-    int writeDataCount = 0, chainCount = 0;
+    // Replay chain DMA + GP1 commands to find which GP1 wipes the gargoyle
+    int opIdx = 0;
     for (int i = 0; i < s_sotnFrameCount; i++) {
         const auto &op = s_sotnFrame[i];
         switch (op.type) {
+            case 'C':
+                for (int j = 0; j < op.count; j++)
+                    gpu->writeData(op.data[j]);
+                break;
+            case 'S':
+                fprintf(stderr, "[GP1] writeStatus(%08x) before chain op %d\n", op.data[0], opIdx);
+                gpu->writeStatus(op.data[0]);
+                break;
             case 'D':
                 gpu->writeData(op.data[0]);
                 break;
-            case 'S':
-                gpu->writeStatus(op.data[0]);
-                break;
-            case 'C':
-                // Chain DMA: feed as a single buffer (like real DMA)
-                gpu->directDMAWrite(op.data, op.count, 0);
-                chainCount++;
-                break;
             case 'A':
-                // Direct DMA write
                 gpu->directDMAWrite(op.data, op.count, 0);
                 break;
         }
+        if (op.type == 'C') opIdx++;
+        if (opIdx > 14$limit) break;
     }
 
-    // End frame
+    // Check vertex count by reading VRAM before endFrame
+    // First, let's see what the FastFill produced
     endFrame();
+    auto vramMid = readVRAM16();
+    int fastfillBlack = 0;
+    for (int y = 0; y < 240; y++)
+        for (int x = 0; x < 384; x++)
+            if (vramMid[y * W + x] == 0) fastfillBlack++;
+    fprintf(stderr, "[REPLAY] After replay: %d black pixels in framebuffer (of %d)\n",
+            fastfillBlack, 384*240);
 
-    // Check: the gargoyle area should have non-black pixels
-    auto vram = readVRAM16();
+    // Also try reading the raw m_vram16 mirror (bypasses Metal completely)
+    auto slice2 = gpu->getVRAM(PCSX::GPU::Ownership::BORROW);
+    auto *raw16 = reinterpret_cast<const uint16_t*>(slice2.data());
+    int rawNonBlack = 0;
+    for (int y = 10; y < 230; y++)
+        for (int x = 10; x < 374; x++)
+            if (raw16[y * W + x] != 0) rawNonBlack++;
+    fprintf(stderr, "[REPLAY] m_vram16 non-black in gargoyle area: %d\n", rawNonBlack);
+
+    // Check the CLUT at (256, 241)
+    fprintf(stderr, "[REPLAY] CLUT at (256,241): %04x %04x %04x %04x\n",
+            vramMid[241*W+256], vramMid[241*W+257], vramMid[241*W+258], vramMid[241*W+259]);
+
+    // Check the texture data at (704, 0)
+    fprintf(stderr, "[REPLAY] Tex at (704,0): %04x %04x %04x %04x\n",
+            vramMid[0*W+704], vramMid[0*W+705], vramMid[0*W+706], vramMid[0*W+707]);
+
+    // Check draw area region — anything at (256,0)?
+    fprintf(stderr, "[REPLAY] VRAM at gargoyle corners: (0,0)=%04x (128,120)=%04x (256,0)=%04x (383,239)=%04x\n",
+            vramMid[0*W+0], vramMid[120*W+128], vramMid[0*W+256], vramMid[239*W+383]);
+
+    auto vram = vramMid;
     int nonBlack = 0;
     for (int y = 10; y < 230; y++)
         for (int x = 10; x < 118; x++)

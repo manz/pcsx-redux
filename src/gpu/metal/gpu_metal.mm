@@ -779,6 +779,15 @@ template <PCSX::GPU::Shading shading, PCSX::GPU::Shape shape, PCSX::GPU::Texture
           PCSX::GPU::Blend blend, PCSX::GPU::Modulation modulation>
 void PCSX::MetalGPU::polyExec(Poly<shading, shape, textured, blend, modulation> *prim) {
     if constexpr (textured == Textured::Yes) s_log.polysTex++; else s_log.polysUntex++;
+    static int polyDebugCount = 0;
+    if (polyDebugCount < 10) {
+        polyDebugCount++;
+        fprintf(stderr, "[POLY] exec: (%d,%d) tex=%d quad=%d verts=%d\n",
+                prim->x[0], prim->y[0],
+                (int)(textured == Textured::Yes),
+                (int)(shape == Shape::Quad),
+                m_vertexCount);
+    }
     if constexpr (blend == Blend::Off) setTransparency<Transparency::Opaque>();
     else setTransparency<Transparency::Transparent>();
 
