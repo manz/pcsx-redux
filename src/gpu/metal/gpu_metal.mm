@@ -230,6 +230,7 @@ struct PCSX::MetalGPU::MetalObjects {
     id<MTLTexture>              displayTexture = nil;     // decoded display output (for 24-bit mode)
     id<MTLTexture>              displaySnapshot = nil;    // snapshot of VRAM for ImGui to sample
     id<MTLBuffer>               vertexBuffer = nil;       // streaming vertex data
+    id<MTLBuffer>               vblankStaging = nil;      // reusable staging buffer for display readback
     id<MTLRenderPipelineState>  psoOpaque = nil;
     id<MTLRenderPipelineState>  psoBlendAdd = nil;
     id<MTLRenderPipelineState>  psoBlendRevSub = nil;
@@ -1087,7 +1088,11 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
         // has all the frame's draws. Use a new command buffer for the readback.
         int sw = scaledWidth(), sh = scaledHeight();
         size_t vramBytes = sw * sh * 4;
-        auto *staging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
+        // Reuse staging buffer across frames to avoid per-frame allocation
+        if (!m_mtl->vblankStaging || m_mtl->vblankStaging.length < vramBytes) {
+            m_mtl->vblankStaging = [m_mtl->device newBufferWithLength:vramBytes options:MTLResourceStorageModeShared];
+        }
+        auto *staging = m_mtl->vblankStaging;
         auto *cb = [m_mtl->commandQueue commandBuffer];
         auto *blit = [cb blitCommandEncoder];
         [blit copyFromTexture:m_mtl->vramRenderTarget sourceSlice:0 sourceLevel:0
