@@ -2281,6 +2281,17 @@ when changing this setting.)"));
 This is experimental and not fully implemented yet.
 Requires a restart when changing this setting.)"));
         changed |= ImGui::SliderInt(_("Internal Resolution"), &settings.get<Emulator::SettingMetalResolutionScale>().value, 1, 8);
+        {
+            bool pgxpEnabled = g_emulator->config().PGXP_GTE;
+            if (ImGui::Checkbox(_("PGXP (Precision Geometry)"), &pgxpEnabled)) {
+                g_emulator->config().PGXP_GTE = pgxpEnabled;
+                g_emulator->config().PGXP_Mode = pgxpEnabled ? 1 : 0;
+                g_emulator->setPGXPMode(g_emulator->config().PGXP_Mode);
+            }
+            ImGuiHelpers::ShowHelpMarker(_(R"(Preserves sub-pixel vertex precision from the GTE.
+Eliminates polygon wobble at high internal resolution.
+Takes effect immediately — no restart needed.)"));
+        }
         ImGuiHelpers::ShowHelpMarker(_(R"(Resolution multiplier (1/2/4/8). Renders geometry at higher
 internal resolution. Polygon edges become smoother.
 Requires a restart when changing this setting.)"));
