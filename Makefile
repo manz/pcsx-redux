@@ -232,8 +232,16 @@ IMGUI_OBJECTS := $(addprefix objs/$(BUILD)/,$(patsubst %.cpp,%.o,$(filter %.cpp,
 VIXL_OBJECTS := $(addprefix objs/$(BUILD)/,$(patsubst %.cc,%.o,$(filter %.cc,$(VIXL_SRCS))))
 $(IMGUI_OBJECTS): EXTRA_CPPFLAGS := $(IMGUI_CPPFLAGS)
 
-TESTS_SRC := $(call rwildcard,tests/,*.cc)
-TESTS := $(patsubst %.cc,%,$(TESTS_SRC))
+TESTS_SRC := $(filter-out tests/metal/%,$(call rwildcard,tests/,*.cc))
+ifeq ($(PCSX_METAL),true)
+TESTS_SRC += $(call rwildcard,tests/metal/,*_integration_test.mm)
+endif
+TESTS := $(patsubst %.cc,%,$(filter %.cc,$(TESTS_SRC)))
+TESTS += $(patsubst %.mm,%,$(filter %.mm,$(TESTS_SRC)))
+
+# Compile .mm test files (test .o goes next to source, not in objs/)
+tests/%.o: tests/%.mm
+	$(CXX) -c -o $@ $< $(CPPFLAGS) $(EXTRA_CPPFLAGS) $(CXXFLAGS)
 
 DEPS += $(addprefix deps/$(BUILD)/,$(patsubst %.c,%.dep,$(filter %.c,$(SRCS))))
 DEPS += $(addprefix deps/$(BUILD)/,$(patsubst %.cc,%.dep,$(filter %.cc,$(SRCS))))
