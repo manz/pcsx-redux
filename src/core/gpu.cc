@@ -35,6 +35,51 @@
 #define GPUSTATUS_IDLE 0x04000000  // CMD ready
 #define GPUSTATUS_MODE 0x02000000  // Data request mode
 
+// ===========================================================================
+// GPU command capture for replay testing.
+// Set PCSX_GPU_CAPTURE=<frames> env var to enable. Writes to gpu_capture.bin.
+// Binary format: sequence of tagged records:
+//   'D' + uint32_t           : writeData word
+//   'S' + uint32_t           : writeStatus word
+//   'A' + int32_t + uint32_t[n] : directDMAWrite (n words)
+//   'V'                      : vblank (frame boundary)
+// ===========================================================================
+static FILE *s_gpuCaptureFile = nullptr;
+static bool s_gpuCaptureChecked = false;
+static int s_gpuCaptureFrames = 0;
+static int s_gpuCaptureMaxFrames = 0;
+
+static void gpuCaptureInit() {
+    if (s_gpuCaptureChecked) return;
+    s_gpuCaptureChecked = true;
+    const char *env = getenv("PCSX_GPU_CAPTURE");
+    if (env) {
+        s_gpuCaptureMaxFrames = atoi(env);
+        if (s_gpuCaptureMaxFrames <= 0) s_gpuCaptureMaxFrames = 300;
+        s_gpuCaptureFile = fopen("gpu_capture.bin", "wb");
+        if (s_gpuCaptureFile)
+            fprintf(stderr, "[GPU] Capture enabled: %d frames → gpu_capture.bin\n", s_gpuCaptureMaxFrames);
+    }
+}
+
+static void gpuCaptureWrite(uint8_t tag, const void *data, size_t len) {
+    if (!s_gpuCaptureFile) return;
+    fwrite(&tag, 1, 1, s_gpuCaptureFile);
+    if (len > 0) fwrite(data, 1, len, s_gpuCaptureFile);
+}
+
+void gpuCaptureVblank() {
+    gpuCaptureInit();
+    if (!s_gpuCaptureFile) return;
+    gpuCaptureWrite('V', nullptr, 0);
+    s_gpuCaptureFrames++;
+    if (s_gpuCaptureMaxFrames > 0 && s_gpuCaptureFrames >= s_gpuCaptureMaxFrames) {
+        fprintf(stderr, "[GPU] Capture complete: %d frames → gpu_capture.bin\n", s_gpuCaptureFrames);
+        fclose(s_gpuCaptureFile);
+        s_gpuCaptureFile = nullptr;
+    }
+}
+
 namespace PCSX {
 
 // clang-format off
@@ -583,6 +628,7 @@ void PCSX::GPU::gpuInterrupt() {
 }
 
 void PCSX::GPU::writeStatus(uint32_t value) {
+    if (s_gpuCaptureFile) gpuCaptureWrite('S', &value, 4);
     uint32_t cmd = (value >> 24) & 0xff;
     bool gotUnknown = false;
 
@@ -682,11 +728,19 @@ void PCSX::GPU::write1(CtrlQuery *ctrl) {
 }
 
 void PCSX::GPU::writeData(uint32_t value) {
+    gpuCaptureInit();
+    if (s_gpuCaptureFile) gpuCaptureWrite('D', &value, 4);
     Buffer buf(value);
     m_processor->processWrite(buf, Logged::Origin::DATAWRITE, value, 1);
 }
 
 void PCSX::GPU::directDMAWrite(const uint32_t *feed, int transferSize, uint32_t hwAddr) {
+    if (s_gpuCaptureFile) {
+        uint8_t tag = 'A';
+        fwrite(&tag, 1, 1, s_gpuCaptureFile);
+        fwrite(&transferSize, 4, 1, s_gpuCaptureFile);
+        fwrite(feed, 4, transferSize, s_gpuCaptureFile);
+    }
     Buffer buf(feed, transferSize);
     while (!buf.isEmpty()) {
         m_processor->processWrite(buf, Logged::Origin::DIRECT_DMA, hwAddr, transferSize);
@@ -742,6 +796,13 @@ void PCSX::GPU::chainedDMAWrite(const uint32_t *memory, uint32_t hwAddr) {
 
         // # 32-bit blocks to transfer
         uint32_t transferWords = header >> 24;
+        if (s_gpuCaptureFile && transferWords > 0) {
+            uint8_t tag = 'C';
+            fwrite(&tag, 1, 1, s_gpuCaptureFile);
+            int32_t tw = transferWords;
+            fwrite(&tw, 4, 1, s_gpuCaptureFile);
+            fwrite(feed, 4, transferWords, s_gpuCaptureFile);
+        }
         Buffer buf(feed, transferWords);
         while (!buf.isEmpty()) {
             m_processor->processWrite(buf, Logged::Origin::CHAIN_DMA, addr, transferWords);

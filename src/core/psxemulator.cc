@@ -179,7 +179,11 @@ void PCSX::Emulator::shutdown() {
     m_pads->shutdown();
 }
 
+// Defined in gpu.cc
+extern void gpuCaptureVblank();
+
 void PCSX::Emulator::vsync() {
+    gpuCaptureVblank();
     m_gpu->vblank();
     g_system->m_eventBus->signal<Events::GPU::VSync>({});
     g_system->update(true);
