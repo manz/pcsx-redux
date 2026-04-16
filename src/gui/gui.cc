@@ -78,7 +78,7 @@ extern "C" {
 #endif
 #ifdef PCSX_METAL
 #include "gui/gui_metal.h"
-// gpu_metal.h no longer needed — getDisplayTextureID/getDisplayUVs are virtual on GPU base class
+#include "gpu/metal/gpu_metal.h"
 #endif
 #include "imgui_internal.h"
 #include "imgui_stdlib.h"
@@ -1695,7 +1695,40 @@ in Configuration->Emulation, restart PCSX-Redux, then try again.)"));
 
     ImGui::SetNextWindowPos(ImVec2(10, 20), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(1024, 512), ImGuiCond_FirstUseEver);
-#ifndef PCSX_METAL
+#ifdef PCSX_METAL
+    {
+        auto *metalGpu = static_cast<PCSX::MetalGPU *>(g_emulator->m_gpu.get());
+        auto *viewerTex = metalGpu->getVRAMViewerTextureID();
+        if (viewerTex && (m_mainVRAMviewer.m_show || m_clutVRAMviewer.m_show)) {
+            metalGpu->updateVRAMViewerTexture();
+        }
+        ImTextureID texID = viewerTex ? reinterpret_cast<ImTextureID>(viewerTex) : ImTextureID{};
+        if (m_mainVRAMviewer.m_show) {
+            ImGui::SetNextWindowSize(ImVec2(1024, 550), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(_("VRAM Viewer"), &m_mainVRAMviewer.m_show)) {
+                if (texID) {
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    ImGui::Image(texID, avail, ImVec2(0, 0), ImVec2(1, 1));
+                } else {
+                    ImGui::TextUnformatted("No VRAM texture available (emulator not running?)");
+                }
+            }
+            ImGui::End();
+        }
+        if (m_clutVRAMviewer.m_show) {
+            ImGui::SetNextWindowSize(ImVec2(512, 300), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(_("CLUT Viewer"), &m_clutVRAMviewer.m_show)) {
+                if (texID) {
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    ImGui::Image(texID, avail, ImVec2(0, 0), ImVec2(1, 1));
+                } else {
+                    ImGui::TextUnformatted("No VRAM texture available (emulator not running?)");
+                }
+            }
+            ImGui::End();
+        }
+    }
+#else
     if (m_mainVRAMviewer.m_show) m_mainVRAMviewer.draw(this, g_emulator->m_gpu->getVRAMTexture());
     if (m_clutVRAMviewer.m_show) m_clutVRAMviewer.draw(this, g_emulator->m_gpu->getVRAMTexture());
     for (auto& viewer : m_VRAMviewers) {

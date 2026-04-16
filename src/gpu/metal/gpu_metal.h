@@ -36,6 +36,8 @@ class MetalGPU final : public GPU {
 
     void *getDisplayTextureID() override;
     void getDisplayUVs(float &u0, float &v0, float &u1, float &v1) override;
+    void *getVRAMViewerTextureID();
+    void updateVRAMViewerTexture();
 
   private:
     int initBackend(UI *) override;

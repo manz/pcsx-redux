@@ -229,8 +229,10 @@ struct PCSX::MetalGPU::MetalObjects {
     id<MTLTexture>              vramSampleTexture = nil;  // R16Uint — raw 16-bit VRAM for shader reads
     id<MTLTexture>              displayTexture = nil;     // decoded display output (for 24-bit mode)
     id<MTLTexture>              displaySnapshot = nil;    // snapshot of VRAM for ImGui to sample
+    id<MTLTexture>              vramViewerTexture = nil;  // decoded 16-bit VRAM for debug viewer (1024x512 RGBA8)
     id<MTLBuffer>               vertexBuffer = nil;       // streaming vertex data
     id<MTLBuffer>               vblankStaging = nil;      // reusable staging buffer for display readback
+    id<MTLBuffer>               vramSyncStaging = nil;    // reusable staging buffer for m_vram16 sync
     id<MTLRenderPipelineState>  psoOpaque = nil;
     id<MTLRenderPipelineState>  psoBlendAdd = nil;
     id<MTLRenderPipelineState>  psoBlendRevSub = nil;
@@ -408,6 +410,15 @@ int PCSX::MetalGPU::initBackend(UI *) {
     snapDesc.usage = MTLTextureUsageShaderRead;
     snapDesc.storageMode = MTLStorageModeShared;
     m_mtl->displaySnapshot = [m_mtl->device newTextureWithDescriptor:snapDesc];
+
+    // VRAM viewer texture: decoded 16-bit VRAM at native resolution for debug viewer
+    auto *viewerDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                          width:c_vramWidth
+                                                                         height:c_vramHeight
+                                                                      mipmapped:NO];
+    viewerDesc.usage = MTLTextureUsageShaderRead;
+    viewerDesc.storageMode = MTLStorageModeShared;
+    m_mtl->vramViewerTexture = [m_mtl->device newTextureWithDescriptor:viewerDesc];
 
     // --- Vertex buffer (shared for CPU writes + GPU reads) ---
     m_mtl->vertexBuffer = [m_mtl->device newBufferWithLength:c_vertexBufferSize * sizeof(Vertex)
@@ -1032,6 +1043,31 @@ void PCSX::MetalGPU::getDisplayUVs(float &u0, float &v0, float &u1, float &v1) {
     }
 }
 
+void *PCSX::MetalGPU::getVRAMViewerTextureID() {
+    if (!m_mtl) return nullptr;
+    return (__bridge void *)m_mtl->vramViewerTexture;
+}
+
+void PCSX::MetalGPU::updateVRAMViewerTexture() {
+    if (!m_mtl) return;
+
+    // Decode from CPU-side 16-bit mirror — no GPU sync needed, safe to call mid-frame.
+    // Shows CPU uploads (CLUTs, textures) but not GPU-rendered content.
+    constexpr int pixCount = c_vramWidth * c_vramHeight;
+    static std::vector<uint32_t> rgba(pixCount);
+    for (int i = 0; i < pixCount; i++) {
+        uint16_t px = m_vram16[i];
+        uint8_t r = ((px >> 0) & 0x1f) * 255 / 31;
+        uint8_t g = ((px >> 5) & 0x1f) * 255 / 31;
+        uint8_t b = ((px >> 10) & 0x1f) * 255 / 31;
+        rgba[i] = r | (g << 8) | (b << 16) | 0xff000000u;
+    }
+    [m_mtl->vramViewerTexture replaceRegion:MTLRegionMake2D(0, 0, c_vramWidth, c_vramHeight)
+                                mipmapLevel:0
+                                  withBytes:rgba.data()
+                                bytesPerRow:c_vramWidth * 4];
+}
+
 void PCSX::MetalGPU::vblank(bool fromGui) {
     renderBatch();
     s_log.dump(m_display);
@@ -1040,10 +1076,34 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
     // Commit the frame's command buffer — ONE GPU sync per frame.
     m_mtl->commitAndWait();
 
+    // Sync the CPU-side 16-bit mirror from the R16Uint sample texture.
+    // This keeps m_vram16 up to date with GPU-rendered content so that
+    // getVRAM(BORROW) returns accurate data without touching Metal state.
+    // Must happen before the 24-bit display decode which reads m_vram16.
+    {
+        constexpr size_t sampleBytes = c_vramWidth * c_vramHeight * 2;
+        if (!m_mtl->vramSyncStaging) {
+            m_mtl->vramSyncStaging = [m_mtl->device newBufferWithLength:sampleBytes
+                                                               options:MTLResourceStorageModeShared];
+        }
+        auto *cb = [m_mtl->commandQueue commandBuffer];
+        auto *blit = [cb blitCommandEncoder];
+        [blit copyFromTexture:m_mtl->vramSampleTexture
+                  sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(c_vramWidth, c_vramHeight, 1)
+                     toBuffer:m_mtl->vramSyncStaging destinationOffset:0
+            destinationBytesPerRow:c_vramWidth * 2
+          destinationBytesPerImage:sampleBytes];
+        [blit endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        memcpy(m_vram16.data(), m_mtl->vramSyncStaging.contents, sampleBytes);
+    }
+
     m_mtl->display24bit = m_display.enabled && (m_display.info.depth == CtrlDisplayMode::CD_24BITS);
 
     if (m_mtl->display24bit) {
-        // 24-bit display decode from raw 16-bit VRAM mirror
+        // 24-bit display decode from raw 16-bit VRAM mirror (freshly synced above)
         int dispX = m_display.start.x();
         int dispY = m_display.start.y();
         int dispW = m_display.size.x();
@@ -1172,12 +1232,25 @@ PCSX::GPU::ScreenShot PCSX::MetalGPU::takeScreenShot() {
 }
 void PCSX::MetalGPU::setLinearFiltering() {}
 
-PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {
+PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership ownership) {
+    constexpr size_t pixCount = c_vramWidth * c_vramHeight;
+    constexpr size_t sampleBytes = pixCount * 2;
+
+    // BORROW: return a lightweight reference to the CPU-side 16-bit VRAM mirror.
+    // This reflects CPU uploads (CLUTs, textures) and GPU-rendered content that has
+    // been synced back.  Safe to call from the GUI thread without touching Metal state.
+    if (ownership == Ownership::BORROW) {
+        Slice slice;
+        slice.borrow(m_vram16.data(), sampleBytes);
+        return slice;
+    }
+
+    // ACQUIRE: full GPU readback — syncs the scaled render target down to native
+    // resolution and copies to a new buffer.  Only used for save states / screenshots.
     if (!m_mtl) return {};
     renderBatch();
-    m_mtl->commitAndWait();  // ensure all GPU work is done before readback
+    m_mtl->commitAndWait();
 
-    // Do a full-VRAM sync: downsample the entire scaled RT to native R16Uint
     m_mtl->ensureNoRenderEncoder();
     m_mtl->ensureFrameCmdBuf();
     auto *enc = [m_mtl->frameCmdBuf computeCommandEncoder];
@@ -1192,8 +1265,6 @@ PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {
     [enc endEncoding];
     m_mtl->commitAndWait();
 
-    constexpr size_t pixCount = c_vramWidth * c_vramHeight;
-    constexpr size_t sampleBytes = pixCount * 2;
     auto *staging = [m_mtl->device newBufferWithLength:sampleBytes options:MTLResourceStorageModeShared];
 
     auto *cmdBuf = [m_mtl->commandQueue commandBuffer];
@@ -1207,22 +1278,19 @@ PCSX::Slice PCSX::MetalGPU::getVRAM(Ownership) {
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
 
-    auto *out16 = new uint16_t[pixCount];
-    memcpy(out16, staging.contents, sampleBytes);
-
     Slice slice;
-    slice.acquire(std::string(reinterpret_cast<const char *>(out16), pixCount * 2));
-    delete[] out16;
+    slice.copy(staging.contents, sampleBytes);
     return slice;
 }
 
 void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_t *pixels, PartialUpdateVram) {
     s_log.cpuUploads++;
-    if (!m_mtl || w <= 0 || h <= 0) return;
+    if (!m_mtl || w <= 0 || h <= 0 || !pixels) return;
 
     renderBatch();
 
     // Update CPU-side raw 16-bit mirror (needed for 24-bit display decode)
+    // PSX VRAM wraps at 1024x512 boundaries
     for (int row = 0; row < h; row++) {
         int destY = (y + row) & 0x1ff;
         for (int col = 0; col < w; col++) {
@@ -1234,25 +1302,42 @@ void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_
     // Must commit pending GPU work before CPU writes to shared textures
     m_mtl->commitAndWait();
 
-    // Upload raw 16-bit directly to sample texture (R16Uint) — no conversion!
-    [m_mtl->vramSampleTexture replaceRegion:MTLRegionMake2D(x, y, w, h)
+    // Clamp region to VRAM bounds for Metal texture uploads.
+    // The CPU mirror above handles wrapping; for the GPU textures we clip to the
+    // non-wrapping portion.  Uploads that wrap around are rare and the CPU mirror
+    // already captured the full data — the next syncVRAMTexture will reconcile.
+    int clampedX = x & 0x3ff;
+    int clampedY = y & 0x1ff;
+    int clampedW = std::min(w, c_vramWidth - clampedX);
+    int clampedH = std::min(h, c_vramHeight - clampedY);
+    if (clampedW <= 0 || clampedH <= 0) return;
+
+    // Build a contiguous buffer for the clamped region (source may have a different stride)
+    std::vector<uint16_t> clampedPixels(clampedW * clampedH);
+    for (int row = 0; row < clampedH; row++) {
+        for (int col = 0; col < clampedW; col++) {
+            clampedPixels[row * clampedW + col] = pixels[row * w + col];
+        }
+    }
+
+    // Upload raw 16-bit directly to sample texture (R16Uint)
+    [m_mtl->vramSampleTexture replaceRegion:MTLRegionMake2D(clampedX, clampedY, clampedW, clampedH)
                                 mipmapLevel:0
-                                  withBytes:pixels
-                                bytesPerRow:w * sizeof(uint16_t)];
+                                  withBytes:clampedPixels.data()
+                                bytesPerRow:clampedW * sizeof(uint16_t)];
 
     // Also upload RGBA8 version to render target at SCALED resolution
     int S = m_resolutionScale;
-    int sw = w * S, sh = h * S;
+    int sw = clampedW * S, sh = clampedH * S;
     std::vector<uint32_t> rgba(sw * sh);
-    for (int ny = 0; ny < h; ny++) {
-        for (int nx = 0; nx < w; nx++) {
-            uint16_t px = pixels[ny * w + nx];
+    for (int ny = 0; ny < clampedH; ny++) {
+        for (int nx = 0; nx < clampedW; nx++) {
+            uint16_t px = clampedPixels[ny * clampedW + nx];
             uint8_t r = ((px >>  0) & 0x1f) * 255 / 31;
             uint8_t g = ((px >>  5) & 0x1f) * 255 / 31;
             uint8_t b = ((px >> 10) & 0x1f) * 255 / 31;
             uint8_t a = (px & 0x8000) ? 0xff : 0x00;
             uint32_t val = r | (g << 8) | (b << 16) | (a << 24);
-            // Fill SxS block in scaled buffer
             for (int dy = 0; dy < S; dy++)
                 for (int dx = 0; dx < S; dx++)
                     rgba[(ny * S + dy) * sw + (nx * S + dx)] = val;
@@ -1266,7 +1351,7 @@ void PCSX::MetalGPU::partialUpdateVRAM(int x, int y, int w, int h, const uint16_
     [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:sw * 4 sourceBytesPerImage:byteSize
                sourceSize:MTLSizeMake(sw, sh, 1)
                toTexture:m_mtl->vramRenderTarget destinationSlice:0 destinationLevel:0
-        destinationOrigin:MTLOriginMake(x * S, y * S, 0)];
+        destinationOrigin:MTLOriginMake(clampedX * S, clampedY * S, 0)];
     [blit endEncoding];
 
     m_syncVRAM = true;
