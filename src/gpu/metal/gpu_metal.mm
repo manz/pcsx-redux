@@ -1132,6 +1132,8 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
 
     if (m_mtl->display24bit) {
         // 24-bit display decode from raw 16-bit VRAM mirror (freshly synced above)
+        // Decode at native resolution then nearest-neighbor upscale to match the
+        // scaled display texture so FMVs fill the full display area.
         int dispX = m_display.start.x();
         int dispY = m_display.start.y();
         int dispW = m_display.size.x();
@@ -1140,7 +1142,9 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
         if (dispW > c_vramWidth) dispW = c_vramWidth;
         if (dispH > c_vramHeight) dispH = c_vramHeight;
 
-        std::vector<uint32_t> decoded(dispW * dispH);
+        int S = m_resolutionScale;
+        int outW = dispW * S, outH = dispH * S;
+        std::vector<uint32_t> decoded(outW * outH);
         for (int y = 0; y < dispH; y++) {
             int srcY = (dispY + y) & 511;
             for (int x = 0; x < dispW; x++) {
@@ -1163,13 +1167,16 @@ void PCSX::MetalGPU::vblank(bool fromGui) {
                     gb = w1 & 0xff;
                     bb = (w1 >> 8) & 0xff;
                 }
-                decoded[y * dispW + x] = rb | (gb << 8) | (bb << 16) | 0xff000000u;
+                uint32_t px = rb | (gb << 8) | (bb << 16) | 0xff000000u;
+                for (int dy = 0; dy < S; dy++)
+                    for (int dx = 0; dx < S; dx++)
+                        decoded[(y * S + dy) * outW + (x * S + dx)] = px;
             }
         }
-        [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, dispW, dispH)
+        [m_mtl->displayTexture replaceRegion:MTLRegionMake2D(0, 0, outW, outH)
                                  mipmapLevel:0
                                    withBytes:decoded.data()
-                                 bytesPerRow:dispW * 4];
+                                 bytesPerRow:outW * 4];
     } else {
         // Blit VRAM render target → display texture for ImGui.
         // The frame command buffer was already committed above, so the render target
