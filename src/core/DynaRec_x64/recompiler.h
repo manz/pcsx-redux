@@ -231,11 +231,15 @@ class DynaRecCPU final : public PCSX::R3000Acpu {
         m_invalidateBlocks();
     }
 
+#ifdef __APPLE__
+    virtual void SetPGXPMode(uint32_t pgxpMode) final {}
+#else
     virtual void SetPGXPMode(uint32_t pgxpMode) final {
         if (pgxpMode != 0) {
             throw std::runtime_error("PGXP not supported in x64 JIT");
         }
     }
+#endif
 
     void dumpBuffer() const {
         std::ofstream file("DynarecOutput.dump", std::ios::binary);  // Make a file for our dump

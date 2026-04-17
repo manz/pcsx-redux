@@ -23,6 +23,7 @@
 
 #include <array>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "core/gpu.h"
@@ -38,6 +39,7 @@ class MetalGPU final : public GPU {
     void getDisplayUVs(float &u0, float &v0, float &u1, float &v1) override;
     void *getVRAMViewerTextureID();
     void updateVRAMViewerTexture();
+    void pgxpCacheVertex(short sx, short sy, const unsigned char *_pVertex) override;
 
   private:
     int initBackend(UI *) override;
@@ -165,7 +167,7 @@ class MetalGPU final : public GPU {
     // Vertex format — matches the OpenGL GPU layout exactly (20 bytes)
     // -----------------------------------------------------------------------
     struct Vertex {
-        int32_t x, y;          // position (signed 11-bit range)
+        float x, y;            // position — float for PGXP sub-pixel precision
         uint32_t color;        // BGR888 (top 8 bits unused)
         uint16_t texpage;      // texture page word, bit 15 = untextured
         uint16_t clut;         // CLUT address
@@ -174,9 +176,9 @@ class MetalGPU final : public GPU {
         static constexpr uint16_t c_untexturedTexpage = 0x8000;
 
         Vertex() = default;
-        Vertex(int px, int py, uint32_t col)
+        Vertex(float px, float py, uint32_t col)
             : x(px), y(py), color(col), texpage(c_untexturedTexpage), clut(0), u(0), v(0) {}
-        Vertex(int px, int py, uint32_t col, uint16_t cl, uint16_t tp, unsigned tu, unsigned tv)
+        Vertex(float px, float py, uint32_t col, uint16_t cl, uint16_t tp, unsigned tu, unsigned tv)
             : x(px), y(py), color(col), texpage(tp), clut(cl), u(tu), v(tv) {}
     };
 
@@ -267,6 +269,13 @@ class MetalGPU final : public GPU {
     int m_vertexCount = 0;
     int m_vertexWriteOffset = 0;  // offset into vertex buffer for next batch
     Uniforms m_uniforms{};
+
+    // PGXP vertex cache — maps packed (sx,sy) to float coords
+    struct PGXPCacheEntry { float x, y, z; };
+    std::unordered_map<uint32_t, PGXPCacheEntry> m_pgxpCache;
+    static uint32_t pgxpKey(short sx, short sy) { return (uint32_t(uint16_t(sx)) << 16) | uint16_t(sy); }
+    // Look up PGXP precision coords for integer vertex; returns float coords
+    void pgxpLookup(int ix, int iy, float &ox, float &oy);
 
     int m_drawAreaLeft = 0, m_drawAreaRight = 0;
     int m_drawAreaTop = 0, m_drawAreaBottom = 0;

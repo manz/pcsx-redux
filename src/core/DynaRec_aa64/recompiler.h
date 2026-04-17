@@ -244,10 +244,13 @@ class DynaRecCPU final : public PCSX::R3000Acpu {
     }
 
     virtual void SetPGXPMode(uint32_t pgxpMode) final {
-        if (pgxpMode != 0) {
-            throw std::runtime_error("PGXP not supported in x64 JIT");
+        if (pgxpMode != m_pgxpMode) {
+            m_pgxpMode = pgxpMode;
+            uncompileAll();
         }
     }
+
+    uint32_t m_pgxpMode = 0;
 
     // For the GUI dynarec disassembly widget
     virtual const uint8_t* getBufferPtr() final { return gen.getCode<const uint8_t*>(); }

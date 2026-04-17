@@ -23,6 +23,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include "gpu/metal/gpu_metal.h"
+#include "core/pgxp_value.h"
 #include "core/psxemulator.h"
 #include "core/system.h"
 #include "core/ui.h"
@@ -35,7 +36,7 @@ static NSString *const s_metalShaderSource = @R"MSL(
 using namespace metal;
 
 struct VertexIn {
-    int2   position [[attribute(0)]];
+    float2 position [[attribute(0)]];
     uint   color    [[attribute(1)]];
     ushort texpage  [[attribute(2)]];
     ushort clut     [[attribute(3)]];
@@ -69,8 +70,8 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
                             constant Uniforms &u [[buffer(1)]]) {
     VertexOut out;
 
-    float x = float(in.position.x);
-    float y = float(in.position.y);
+    float x = in.position.x;
+    float y = in.position.y;
     // NDC mapping is resolution-independent — the larger RT provides more pixels per NDC unit
     float xx = (x + u.drawOffsetX) / 512.0 - 1.0;
     float yy = (y + u.drawOffsetY) / -256.0 + 1.0;
@@ -434,7 +435,7 @@ int PCSX::MetalGPU::initBackend(UI *) {
     // --- Vertex descriptor ---
     auto *vd = [[MTLVertexDescriptor alloc] init];
     // attribute 0: position (int2, offset 0)
-    vd.attributes[0].format      = MTLVertexFormatInt2;
+    vd.attributes[0].format      = MTLVertexFormatFloat2;
     vd.attributes[0].offset      = offsetof(Vertex, x);
     vd.attributes[0].bufferIndex = 0;
     // attribute 1: color (uint, offset 8)
@@ -654,15 +655,22 @@ void PCSX::MetalGPU::renderBatch() {
 // ---------------------------------------------------------------------------
 void PCSX::MetalGPU::drawTri(int *x, int *y, uint32_t *colors) {
     maybeRenderBatch<3>();
-    for (int i = 0; i < 3; i++) m_vertices[m_vertexCount++] = Vertex(x[i], y[i], colors[i]);
+    for (int i = 0; i < 3; i++) {
+        float fx, fy;
+        pgxpLookup(x[i], y[i], fx, fy);
+        m_vertices[m_vertexCount++] = Vertex(fx, fy, colors[i]);
+    }
 }
 
 void PCSX::MetalGPU::drawTriTextured(int *x, int *y, uint32_t *colors,
                                       uint16_t clut, uint16_t texpage,
                                       unsigned *u, unsigned *v) {
     maybeRenderBatch<3>();
-    for (int i = 0; i < 3; i++)
-        m_vertices[m_vertexCount++] = Vertex(x[i], y[i], colors[i], clut, texpage, u[i], v[i]);
+    for (int i = 0; i < 3; i++) {
+        float fx, fy;
+        pgxpLookup(x[i], y[i], fx, fy);
+        m_vertices[m_vertexCount++] = Vertex(fx, fy, colors[i], clut, texpage, u[i], v[i]);
+    }
 }
 
 void PCSX::MetalGPU::drawRect(int x, int y, int w, int h, uint32_t color) {
@@ -1040,6 +1048,26 @@ void PCSX::MetalGPU::getDisplayUVs(float &u0, float &v0, float &u1, float &v1) {
         v0 = float(m_display.start.y() * S) / sh;
         u1 = u0 + float(m_display.size.x() * S) / sw;
         v1 = v0 + float(m_display.size.y() * S) / sh;
+    }
+}
+
+void PCSX::MetalGPU::pgxpCacheVertex(short sx, short sy, const unsigned char *_pVertex) {
+    if (_pVertex) {
+        auto *pv = reinterpret_cast<const PGXP_value *>(_pVertex);
+        m_pgxpCache[pgxpKey(sx, sy)] = {pv->x, pv->y, pv->z};
+    } else {
+        m_pgxpCache.clear();
+    }
+}
+
+void PCSX::MetalGPU::pgxpLookup(int ix, int iy, float &ox, float &oy) {
+    auto it = m_pgxpCache.find(pgxpKey((short)ix, (short)iy));
+    if (it != m_pgxpCache.end()) {
+        ox = it->second.x;
+        oy = it->second.y;
+    } else {
+        ox = (float)ix;
+        oy = (float)iy;
     }
 }
 

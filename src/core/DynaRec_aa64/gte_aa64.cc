@@ -21,6 +21,7 @@
 
 #if defined(DYNAREC_AA64)
 #include "core/gte.h"
+#include "core/pgxp_gte.h"
 #define COP2_CONTROL_OFFSET(reg) ((uintptr_t) & m_regs.CP2C.r[(reg)] - (uintptr_t)this)
 #define COP2_DATA_OFFSET(reg) ((uintptr_t) & m_regs.CP2D.r[(reg)] - (uintptr_t)this)
 
@@ -110,6 +111,14 @@ void DynaRecCPU::recCTC2(uint32_t code) {
                 break;
         }
     }
+
+    if (m_pgxpMode) {
+        flushRegs();
+        gen.Mov(arg1, code);
+        gen.Ldr(arg2, MemOperand(contextPointer, COP2_CONTROL_OFFSET(_Rd_)));
+        gen.Ldr(arg3, MemOperand(contextPointer, GPR_OFFSET(_Rt_)));
+        call(PGXP_GTE_CTC2);
+    }
 }
 
 void DynaRecCPU::recMTC2(uint32_t code) {
@@ -181,6 +190,14 @@ void DynaRecCPU::recMTC2(uint32_t code) {
         allocateReg(_Rt_);
         gen.Str(m_gprs[_Rt_].allocatedReg, MemOperand(contextPointer, COP2_DATA_OFFSET(_Rd_)));
     }
+
+    if (m_pgxpMode) {
+        flushRegs();
+        gen.Mov(arg1, code);
+        gen.Ldr(arg2, MemOperand(contextPointer, COP2_DATA_OFFSET(_Rd_)));
+        gen.Ldr(arg3, MemOperand(contextPointer, GPR_OFFSET(_Rt_)));
+        call(PGXP_GTE_MTC2);
+    }
 }
 
 static uint32_t MFC2Wrapper(int reg) { return PCSX::g_emulator->m_gte->MFC2(reg); }
@@ -238,6 +255,14 @@ void DynaRecCPU::recMFC2(uint32_t code) {
             }
             break;
     }
+
+    if (m_pgxpMode && _Rt_) {
+        flushRegs();
+        gen.Mov(arg1, code);
+        gen.Ldr(arg2, MemOperand(contextPointer, GPR_OFFSET(_Rt_)));
+        gen.Ldr(arg3, MemOperand(contextPointer, COP2_DATA_OFFSET(_Rd_)));
+        call(PGXP_GTE_MFC2);
+    }
 }
 
 void DynaRecCPU::recCFC2(uint32_t code) {
@@ -246,6 +271,14 @@ void DynaRecCPU::recCFC2(uint32_t code) {
         allocateRegWithoutLoad(_Rt_);
         m_gprs[_Rt_].setWriteback(true);
         gen.Ldr(m_gprs[_Rt_].allocatedReg, MemOperand(contextPointer, COP2_CONTROL_OFFSET(_Rd_)));
+    }
+
+    if (m_pgxpMode && _Rt_) {
+        flushRegs();
+        gen.Mov(arg1, code);
+        gen.Ldr(arg2, MemOperand(contextPointer, GPR_OFFSET(_Rt_)));
+        gen.Ldr(arg3, MemOperand(contextPointer, COP2_CONTROL_OFFSET(_Rd_)));
+        call(PGXP_GTE_CFC2);
     }
 }
 
@@ -282,6 +315,18 @@ void DynaRecCPU::recLWC2(uint32_t code) {
     if (_Rt_ != 31) {
         gen.Str(w0, MemOperand(contextPointer, COP2_DATA_OFFSET(_Rt_)));
     }
+
+    if (m_pgxpMode) {
+        // PGXP_GTE_LWC2(instr, rtVal, addr) — rtVal = loaded value, addr = memory address
+        // COP2_DATA_OFFSET already has the loaded value from the store above.
+        // Recompute the address from GPR[_Rs_] + _Imm_.
+        flushRegs();
+        gen.Mov(arg1, code);
+        gen.Ldr(arg2, MemOperand(contextPointer, COP2_DATA_OFFSET(_Rt_)));
+        gen.Ldr(arg3, MemOperand(contextPointer, GPR_OFFSET(_Rs_)));
+        gen.moveAndAdd(arg3, arg3, _Imm_);
+        call(PGXP_GTE_LWC2);
+    }
 }
 
 void DynaRecCPU::recSWC2(uint32_t code) {
@@ -298,6 +343,16 @@ void DynaRecCPU::recSWC2(uint32_t code) {
     }
 
     call(write32Wrapper);
+
+    if (m_pgxpMode) {
+        // PGXP_GTE_SWC2(instr, rtVal, addr) — rtVal = GTE reg value, addr = memory address
+        flushRegs();
+        gen.Mov(arg1, code);
+        gen.Ldr(arg2, MemOperand(contextPointer, COP2_DATA_OFFSET(_Rt_)));
+        gen.Ldr(arg3, MemOperand(contextPointer, GPR_OFFSET(_Rs_)));
+        gen.moveAndAdd(arg3, arg3, _Imm_);
+        call(PGXP_GTE_SWC2);
+    }
 }
 
 #define GTE_FALLBACK(name)                                                                          \
