@@ -79,7 +79,7 @@ void PCSX::SoftGPU::impl::doBufferSwap(bool fromGui) {
 void PCSX::SoftGPU::impl::clearVRAM() {
     GUI *gui = dynamic_cast<GUI *>(m_ui);
     if (!gui) return;
-    std::memset(m_allocatedVRAM, 0x00, (GPU_HEIGHT * 2) * 1024 + (1024 * 1024));
+    std::memset(m_allocatedVRAM, 0x00, (VRAM_HEIGHT * 2) * 1024 + (1024 * 1024));
 
 #ifdef PCSX_METAL
     if (m_metalDisplay) softMetalUpload16(m_metalDisplay, m_vram16);

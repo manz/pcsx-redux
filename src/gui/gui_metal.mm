@@ -19,16 +19,13 @@
 
 #ifdef PCSX_METAL
 
-#define GLFW_INCLUDE_NONE
-#define GLFW_EXPOSE_NATIVE_COCOA
-#include <GLFW/glfw3.h>
-#include <GLFW/glfw3native.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_metal.h>
 
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 
 #include "imgui.h"
-#include "imgui_impl_glfw.h"
 #include "imgui_impl_metal.h"
 
 #include "gui/gui_metal.h"
@@ -44,12 +41,15 @@ struct MetalContext {
     id<MTLCommandQueue> commandQueue = nil;
     CAMetalLayer* layer = nil;
     MTLRenderPassDescriptor* renderPassDescriptor = nil;
-    GLFWwindow* window = nullptr;
+    SDL_MetalView view = nullptr;
+    SDL_Window* window = nullptr;
 };
 
 void* getDevice() { return (__bridge void*)g_metalDevice; }
 
-void* init(GLFWwindow* window) {
+// The SDL3 platform backend is initialized by the caller (ImGui_ImplSDL3_InitForMetal);
+// this only sets up the Metal layer and the ImGui renderer backend.
+void* init(SDL_Window* window) {
     auto* ctx = new MetalContext();
     ctx->window = window;
 
@@ -57,25 +57,21 @@ void* init(GLFWwindow* window) {
     g_metalDevice = ctx->device;
     ctx->commandQueue = [ctx->device newCommandQueue];
 
-    NSWindow* nswin = glfwGetCocoaWindow(window);
-    ctx->layer = [CAMetalLayer layer];
+    ctx->view = SDL_Metal_CreateView(window);
+    ctx->layer = (__bridge CAMetalLayer*)SDL_Metal_GetLayer(ctx->view);
     ctx->layer.device = ctx->device;
     ctx->layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    ctx->layer.contentsScale = nswin.backingScaleFactor;
-    nswin.contentView.layer = ctx->layer;
-    nswin.contentView.wantsLayer = YES;
 
     ctx->renderPassDescriptor = [MTLRenderPassDescriptor new];
 
     // Pre-configure the render pass with a dummy texture so ImGui_ImplMetal_NewFrame
     // can read the sample count before the first frame's drawable is available.
-    MTLTextureDescriptor *dummyDesc =
+    MTLTextureDescriptor* dummyDesc =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:1 height:1 mipmapped:NO];
     dummyDesc.usage = MTLTextureUsageRenderTarget;
     id<MTLTexture> dummyTexture = [ctx->device newTextureWithDescriptor:dummyDesc];
     ctx->renderPassDescriptor.colorAttachments[0].texture = dummyTexture;
 
-    ImGui_ImplGlfw_InitForOther(window, true);
     ImGui_ImplMetal_Init(ctx->device);
 
     return ctx;
@@ -85,9 +81,9 @@ void shutdown(void* opaque) {
     auto* ctx = static_cast<MetalContext*>(opaque);
     if (!ctx) return;
     ImGui_ImplMetal_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
     ctx->renderPassDescriptor = nil;
     ctx->layer = nil;
+    if (ctx->view) SDL_Metal_DestroyView(ctx->view);
     ctx->commandQueue = nil;
     ctx->device = nil;
     delete ctx;
@@ -102,7 +98,7 @@ void renderFrame(void* opaque, ImDrawData* drawData, float clearR, float clearG,
     auto* ctx = static_cast<MetalContext*>(opaque);
     @autoreleasepool {
         int fbW, fbH;
-        glfwGetFramebufferSize(ctx->window, &fbW, &fbH);
+        SDL_GetWindowSizeInPixels(ctx->window, &fbW, &fbH);
 
         ctx->layer.drawableSize = CGSizeMake(fbW, fbH);
         id<CAMetalDrawable> drawable = [ctx->layer nextDrawable];
@@ -124,15 +120,6 @@ void renderFrame(void* opaque, ImDrawData* drawData, float clearR, float clearG,
         [commandBuffer presentDrawable:drawable];
         [commandBuffer commit];
     }
-}
-
-void destroyFontsTexture(void*) {
-    ImGui_ImplMetal_DestroyFontsTexture();
-}
-
-void createFontsTexture(void* opaque) {
-    auto* ctx = static_cast<MetalContext*>(opaque);
-    ImGui_ImplMetal_CreateFontsTexture(ctx->device);
 }
 
 }  // namespace MetalUI

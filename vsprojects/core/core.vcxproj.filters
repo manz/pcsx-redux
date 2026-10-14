@@ -4,6 +4,9 @@
     <ClCompile Include="..\..\src\core\callstacks.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\core\shmdisplay.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\core\cdrom.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -20,9 +23,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\core\gpu.cc">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\src\core\gte.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\core\kernel.cc">
@@ -127,6 +127,9 @@
     <ClCompile Include="..\..\src\core\OpenGL_GPU\gpu_opengl.cc">
       <Filter>Source Files\OpenGL GPU</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\core\gpudump.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\core\gpulogger.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -143,6 +146,27 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\core\patchmanager.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\core\gte-instructions.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\core\gte-transfer.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\core\ramlogger.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\core\cdromlogger.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\mips-common\util\sjis-decode.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\mips-common\util\sjis-fullwidth-ascii.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\mips-common\util\utf8-decode.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -219,7 +243,7 @@
     <ClInclude Include="..\..\src\core\gdb-server.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\src\mips\common\util\encoder.hh">
+    <ClInclude Include="..\..\src\mips-common\util\encoder.hh">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\core\disr3000a.h">
@@ -238,6 +262,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\core\callstacks.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\core\shmdisplay.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\core\sio1.h">
@@ -270,6 +297,9 @@
     <ClInclude Include="..\..\src\core\OpenGL_GPU\gpu_opengl.h">
       <Filter>Header Files\OpenGL GPU</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\src\core\gpudump.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\src\core\gpulogger.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -295,6 +325,15 @@
       <Filter>Header Files\Dynarec Aarch64</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\core\patchmanager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\core\gte-internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\core\ramlogger.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\core\cdromlogger.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

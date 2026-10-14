@@ -19,6 +19,8 @@
 
 #include "core/sio1-server.h"
 
+#include <uv.h>
+
 #include "core/psxemulator.h"
 #include "core/sio1.h"
 

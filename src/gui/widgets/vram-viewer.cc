@@ -52,6 +52,13 @@ void main() {
 
 static const GLchar *s_defaultPixelShader = GL_SHADER_VERSION R"(
 precision highp float;
+#if __VERSION__ == 300
+// On MacOS, with shader version 410, these are illegal, but on
+// Windows, with shader version 300 es and old drivers, these
+// are mandatory.
+precision highp sampler2D;
+precision highp usampler2D;
+#endif
 
 uniform int u_24shift;
 uniform bool u_alpha;
@@ -347,7 +354,7 @@ void PCSX::Widgets::VRAMViewer::compileShader(GUI *gui) {
     m_attribLocationWrittenHighlight = glGetUniformLocation(m_shaderProgram, "u_writtenHighlight");
 }
 
-PCSX::Widgets::VRAMViewer::VRAMViewer(bool &show) : m_show(show), m_listener(g_system->m_eventBus) {
+PCSX::Widgets::VRAMViewer::VRAMViewer(bool &show) : ZoomableImage(show), m_listener(g_system->m_eventBus) {
     m_editor.setText(s_defaultVertexShader, s_defaultPixelShader, "");
     m_listener.listen<PCSX::Events::GUI::SelectClut>([this](auto event) {
         if (m_hasClut) {
@@ -405,6 +412,8 @@ void PCSX::Widgets::VRAMViewer::drawVRAM(GUI *gui, GLuint textureID) {
     m_mousePos = ImGui::GetIO().MousePos;
 
     ImDrawList *drawList = ImGui::GetWindowDrawList();
+    // The OpenGL backend binds its own sampler object, which overrides the texture's filter parameters.
+    drawList->AddCallback(ImGui::GetPlatformIO().DrawCallback_SetSamplerNearest, nullptr);
     drawList->AddCallback(
         [](const ImDrawList *parentList, const ImDrawCmd *cmd) {
             VRAMViewer *that = reinterpret_cast<VRAMViewer *>(cmd->UserCallbackData);
@@ -437,6 +446,8 @@ void PCSX::Widgets::VRAMViewer::drawVRAM(GUI *gui, GLuint textureID) {
     }
 
     drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    // Without sampler objects, the backend's filter mode survives the reset.
+    drawList->AddCallback(ImGui::GetPlatformIO().DrawCallback_SetSamplerLinear, nullptr);
 
     const auto &io = ImGui::GetIO();
 
@@ -553,10 +564,10 @@ void PCSX::Widgets::VRAMViewer::imguiCB(const ImDrawList *parentList, const ImDr
     glUniform1i(m_attribLocationTex, 0);
     glEnableVertexAttribArray(m_attribLocationVtxPos);
     glVertexAttribPointer(m_attribLocationVtxPos, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert),
-                          (GLvoid *)IM_OFFSETOF(ImDrawVert, pos));
+                          (GLvoid *)offsetof(ImDrawVert, pos));
     glEnableVertexAttribArray(m_attribLocationVtxUV);
     glVertexAttribPointer(m_attribLocationVtxUV, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert),
-                          (GLvoid *)IM_OFFSETOF(ImDrawVert, uv));
+                          (GLvoid *)offsetof(ImDrawVert, uv));
     glUniform4f(m_attribLocationWrittenColor, m_writtenColor.x, m_writtenColor.y, m_writtenColor.z, m_writtenColor.w);
     glUniform1i(m_attribLocationWrittenHeatmap, 1);
     glUniform1i(m_attribLocationWrittenHighlight, 3);
@@ -573,10 +584,10 @@ void PCSX::Widgets::VRAMViewer::imguiCB(const ImDrawList *parentList, const ImDr
     glActiveTexture(GL_TEXTURE0);
 }
 
+ImVec2 PCSX::Widgets::VRAMViewer::defaultViewSize() const { return {512.0f / RATIOS[m_vramMode], 512.0f}; }
+
 void PCSX::Widgets::VRAMViewer::resetView() {
-    m_cornerTL = {0.0f, 0.0f};
-    m_cornerBR = {512.0f / RATIOS[m_vramMode], 512.0f};
-    m_cornerBR *= m_DPI;
+    ZoomableImage::resetView();
     m_magnifyAmount = 5.0f;
     m_magnifyRadius = 150.0f * m_DPI;
 }
@@ -747,12 +758,4 @@ void PCSX::Widgets::VRAMViewer::focusOn(ImVec2 topLeft, ImVec2 bottomRight) {
     moveTo(topLeft);
     ImVec2 center = (topLeft + (bottomRight - topLeft) / 2) / ImVec2(1024.0f, 512.0f);
     zoom(0.9f, center);
-}
-
-void PCSX::Widgets::VRAMViewer::zoom(float factor, ImVec2 centerUV) {
-    ImVec2 dimensions = m_cornerBR - m_cornerTL;
-    ImVec2 newDimensions = dimensions * factor;
-    ImVec2 dimensionsDiff = newDimensions - dimensions;
-    m_cornerTL -= dimensionsDiff * centerUV;
-    m_cornerBR = m_cornerTL + newDimensions;
 }

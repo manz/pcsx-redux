@@ -82,6 +82,12 @@ void main() {
 static const GLchar *const c_defaultPixelShader = GL_SHADER_VERSION R"(
 // The Pixel Shader is most likely what the user will want to change.
 precision highp float;
+#if __VERSION__ == 300
+// On MacOS, with shader version 410, these are illegal, but on
+// Windows, with shader version 300 es and old drivers, these
+// are mandatory.
+precision highp sampler2D;
+#endif
 uniform sampler2D Texture;
 in vec2 Frag_UV;
 in vec4 Frag_Color;
@@ -137,6 +143,12 @@ end
 )";
 
 static const GLchar *const c_24bppConversionFragShader = GL_SHADER_VERSION R"(
+#if __VERSION__ == 300
+// On MacOS, with shader version 410, these are illegal, but on
+// Windows, with shader version 300 es and old drivers, these
+// are mandatory.
+precision highp sampler2D;
+#endif
 uniform sampler2D Texture;
 in vec2 Frag_UV;
 in vec4 Frag_Color;
@@ -752,7 +764,10 @@ void PCSX::Widgets::ShaderEditor::renderWithImgui(GUI *gui, ImTextureID textureI
 }
 
 void PCSX::Widgets::ShaderEditor::imguiCB(const ImDrawList *parentList, const ImDrawCmd *cmd) {
-    GLuint textureID = static_cast<GLuint>(cmd->TextureId);
+    // ImGui v1.92 renamed ImDrawCmd::TextureId to ImDrawCmd::TexRef (an
+    // ImTextureRef). GetTexID() returns the underlying ImTextureID we
+    // previously read directly.
+    GLuint textureID = static_cast<GLuint>(cmd->TexRef.GetTexID());
 
     GLfloat projMtx[4][4];
     if (m_imguiProjMtxLoc == -1) {

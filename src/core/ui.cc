@@ -19,6 +19,8 @@
 
 #include "core/ui.h"
 
+#include <uv.h>
+
 #include <fstream>
 
 #include "core/callstacks.h"

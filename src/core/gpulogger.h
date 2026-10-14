@@ -22,6 +22,8 @@
 #include <stdint.h>
 
 #include <array>
+#include <type_traits>
+#include <vector>
 
 #include "core/gpu.h"
 #include "support/eventbus.h"
@@ -36,14 +38,39 @@ class GPULogger;
 
 class GPULogger {
   public:
+    // A rectangle of VRAM to watch. Any logged command whose read or write footprint intersects an
+    // enabled breakpoint pauses the emulator. The footprints come straight from Logged::getVertices,
+    // so this covers primitives, blits, and the palette rows of paletted textures alike.
+    struct VramBreakpoint {
+        union {
+            int raw[4];
+            struct {
+                int x, y, w, h;
+            };
+        } area = {0, 0, 64, 64};
+        bool onRead = false;
+        bool onWrite = true;
+        bool enabled = true;
+    };
+
     GPULogger();
     void clearFrameLog() { m_list.destroyAll(); }
     template <typename T>
     void addNode(const T& data, GPU::Logged::Origin origin, uint32_t value, uint32_t length) {
+        if constexpr (std::is_same_v<T, GPU::CtrlDisplayStart>) {
+            // A game flips buffers by moving the display start, so counting the moves gives its framerate.
+            // This does not work for interlaced games that keep displaying the same buffer.
+            uint32_t start = data.x | (data.y << 16);
+            if (start != m_lastDisplayStart) {
+                m_lastDisplayStart = start;
+                m_displayStartChanges++;
+            }
+        }
         if (m_enabled) {
             addNodeInternal(new T(data), origin, value, length);
         }
     }
+    float getGuestFPS() const { return m_guestFPS; }
     void replay(GPU*);
     void highlight(GPU::Logged* node, bool only = false);
     void enable();
@@ -56,12 +83,18 @@ class GPULogger {
   private:
     void startNewFrame();
     void addNodeInternal(GPU::Logged* node, GPU::Logged::Origin, uint32_t value, uint32_t length);
+    void checkVramBreakpoints(GPU::Logged* node);
 
     EventBus::Listener m_listener;
     bool m_enabled = false;
     bool m_breakOnVSync = false;
+    std::vector<VramBreakpoint> m_vramBreakpoints;
     bool m_hasFramebuffers = false;
     uint64_t m_frameCounter = 0;
+    uint32_t m_lastDisplayStart = 0xffffffff;
+    unsigned m_displayStartChanges = 0;
+    unsigned m_fpsVSyncs = 0;
+    float m_guestFPS = 0.0f;
     GPU::LoggedList m_list;
     Slice m_vram;
     float m_impact = 1.0f / 256.0f;

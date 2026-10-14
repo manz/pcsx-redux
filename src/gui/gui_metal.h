@@ -21,19 +21,17 @@
 
 #ifdef PCSX_METAL
 
-struct GLFWwindow;
+struct SDL_Window;
 struct ImDrawData;
 
 namespace PCSX {
 namespace MetalUI {
 
 void* getDevice();
-void* init(GLFWwindow* window);
+void* init(SDL_Window* window);
 void shutdown(void* ctx);
 void newFrame(void* ctx);
 void renderFrame(void* ctx, ImDrawData* drawData, float clearR, float clearG, float clearB, float clearA);
-void destroyFontsTexture(void* ctx);
-void createFontsTexture(void* ctx);
 
 }  // namespace MetalUI
 }  // namespace PCSX

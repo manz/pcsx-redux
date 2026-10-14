@@ -20,6 +20,7 @@
 #pragma once
 
 #include <assert.h>
+#include <uv.h>
 
 #include <cstdarg>
 #include <string>

@@ -20,8 +20,9 @@
 #include "core/gdb-server.h"
 
 #include <assert.h>
+#include <uv.h>
 
-#include <magic_enum_all.hpp>
+#include <magic_enum/magic_enum_all.hpp>
 
 #include "core/cdrom.h"
 #include "core/debug.h"
@@ -603,9 +604,25 @@ void PCSX::GdbClient::processCommand() {
             close();
             return;
         }
+        if ((action == Action::ADD) && (type <= 4) &&
+            !g_emulator->settings.get<Emulator::SettingDebugSettings>().get<Emulator::DebugSettings::Debug>()) {
+            // breakpoints are only checked when the debugger is enabled
+            g_system->printf(_("GDB server: refusing breakpoint at %08x, the debugger is disabled (use -debugger)\n"),
+                             addr);
+            write("E02");
+            return;
+        }
+        if ((action == Action::ADD) && (type >= 2) && (type <= 4)) {
+            // watchpoint ranges: reject empty ones and ones wrapping around the address space
+            uint32_t start = addr & ~0xe0000000;
+            if ((kind == 0) || (start + kind - 1 < start)) {
+                write("E01");
+                return;
+            }
+        }
         const auto bpActionExec = [action, this](uint32_t addr, Debug::BreakpointType type, unsigned width) -> void {
             if (action == Action::ADD) {
-                auto bp = g_emulator->m_debug->addBreakpoint(addr, type, 4, _("GDB client"));
+                auto bp = g_emulator->m_debug->addBreakpoint(addr, type, width, _("GDB client"));
                 m_breakpoints.push_back(bp);
             } else {
                 addr &= ~0xe0000000;
@@ -758,7 +775,7 @@ void PCSX::GdbClient::processMonitorCommand(const std::string& cmd) {
             auto pathCmd = cmd.substr(8);
             auto pathView = StringsHelpers::trim(pathCmd);
             g_emulator->m_cdrom->setIso(new CDRIso(pathView));
-            g_emulator->m_cdrom->check();
+            g_emulator->m_cdrom->parseIso();
         }
     } else if (words[0] == "sharedmem") {
         if (words.size() != 2) {
@@ -769,6 +786,15 @@ void PCSX::GdbClient::processMonitorCommand(const std::string& cmd) {
             } else {
                 writeEscaped("Unknown type. Valid types: wram");
             }
+        }
+    } else if (words[0] == "cache") {
+        // Writing memory over gdb won't invalidate anything by itself: most of what goes through
+        // there is data, and there's no d-cache to worry about. Patching code needs this after.
+        if ((words.size() != 2) || (words[1] != "flush")) {
+            writeEscaped("Usage: cache flush\n");
+        } else {
+            writeEscaped("Flushing i-cache\n");
+            g_emulator->m_cpu->invalidateCache();
         }
     }
     write("OK");

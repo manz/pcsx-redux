@@ -19,13 +19,11 @@
 
 #pragma once
 
-#ifndef PCSX_METAL
 #include <GL/gl3w.h>
-#endif
 #include <stdarg.h>
 
 #include <functional>
-#include <magic_enum_all.hpp>
+#include <magic_enum/magic_enum_all.hpp>
 #include <map>
 #include <memory>
 #include <set>
@@ -41,21 +39,27 @@
 #include "gui/widgets/assembly.h"
 #include "gui/widgets/breakpoints.h"
 #include "gui/widgets/callstacks.h"
+#include "gui/widgets/cdrom-viewer.h"
 #include "gui/widgets/console.h"
 #include "gui/widgets/dynarec_disassembly.h"
 #include "gui/widgets/events.h"
 #include "gui/widgets/filedialog.h"
+#include "gui/widgets/gpudump.h"
 #include "gui/widgets/gpulogger.h"
 #include "gui/widgets/handlers.h"
+#include "gui/widgets/heap_viewer.h"
+#include "gui/widgets/hwregs.h"
 #include "gui/widgets/isobrowser.h"
 #include "gui/widgets/kernellog.h"
 #include "gui/widgets/log.h"
 #include "gui/widgets/luaeditor.h"
 #include "gui/widgets/luainspector.h"
 #include "gui/widgets/memcard_manager.h"
+#include "gui/widgets/msan_viewer.h"
 #include "gui/widgets/named_savestates.h"
 #include "gui/widgets/patches.h"
 #include "gui/widgets/pio-cart.h"
+#include "gui/widgets/ram-viewer.h"
 #include "gui/widgets/registers.h"
 #include "gui/widgets/shader-editor.h"
 #include "gui/widgets/sio1.h"
@@ -75,8 +79,14 @@
 #define GL_SHADER_VERSION "#version 300 es\n"
 #endif
 
-struct GLFWwindow;
-struct NVGcontext;
+struct SDL_Window;
+struct SDL_GLContextState;
+typedef SDL_GLContextState *SDL_GLContext;
+struct ImGuiViewport;
+namespace tvg {
+struct GlCanvas;
+struct Scene;
+}  // namespace tvg
 
 namespace PCSX {
 
@@ -115,6 +125,12 @@ class GUI final : public UI {
     typedef Setting<bool, TYPESTRING("ShowSIO1")> ShowSIO1;
     typedef Setting<bool, TYPESTRING("ShowIsoBrowser")> ShowIsoBrowser;
     typedef Setting<bool, TYPESTRING("ShowGPULogger")> ShowGPULogger;
+    typedef Setting<bool, TYPESTRING("ShowGPUDump")> ShowGPUDump;
+    typedef Setting<bool, TYPESTRING("ShowRAMViewer")> ShowRAMViewer;
+    typedef Setting<bool, TYPESTRING("ShowCDRomViewer")> ShowCDRomViewer;
+    typedef Setting<bool, TYPESTRING("ShowHeapViewer")> ShowHeapViewer;
+    typedef Setting<bool, TYPESTRING("ShowHWRegs")> ShowHWRegs;
+    typedef Setting<bool, TYPESTRING("ShowMsanViewer")> ShowMsanViewer;
     typedef Setting<int, TYPESTRING("WindowPosX"), 0> WindowPosX;
     typedef Setting<int, TYPESTRING("WindowPosY"), 0> WindowPosY;
     typedef Setting<int, TYPESTRING("WindowSizeX"), 1280> WindowSizeX;
@@ -159,29 +175,23 @@ class GUI final : public UI {
              ShowCLUTVRAMViewer, ShowVRAMViewer1, ShowVRAMViewer2, ShowVRAMViewer3, ShowVRAMViewer4, ShowMemoryObserver,
              ShowTypedDebugger, ShowPatches, ShowMemcardManager, ShowRegisters, ShowAssembly, ShowDisassembly,
              ShowBreakpoints, ShowNamedSaveStates, ShowEvents, ShowHandlers, ShowKernelLog, ShowCallstacks, ShowSIO1,
-             ShowIsoBrowser, ShowGPULogger, MainFontSize, MonoFontSize, GUITheme, AllowMouseCaptureToggle,
-             EnableRawMouseMotion, WidescreenRatio, ShowPIOCartConfig, ShowMemoryEditor1, ShowMemoryEditor2,
-             ShowMemoryEditor3, ShowMemoryEditor4, ShowMemoryEditor5, ShowMemoryEditor6, ShowMemoryEditor7,
-             ShowMemoryEditor8, ShowParallelPortEditor, ShowScratchpadEditor, ShowHWRegsEditor, ShowBiosEditor,
-             ShowVRAMEditor, MemoryEditor1Addr, MemoryEditor2Addr, MemoryEditor3Addr, MemoryEditor4Addr,
-             MemoryEditor5Addr, MemoryEditor6Addr, MemoryEditor7Addr, MemoryEditor8Addr, ParallelPortEditorAddr,
-             ScratchpadEditorAddr, HWRegsEditorAddr, BiosEditorAddr, VRAMEditorAddr>
+             ShowIsoBrowser, ShowGPULogger, ShowGPUDump, ShowRAMViewer, ShowCDRomViewer, ShowHeapViewer, ShowHWRegs,
+             MainFontSize, MonoFontSize, GUITheme, AllowMouseCaptureToggle, EnableRawMouseMotion, WidescreenRatio,
+             ShowPIOCartConfig, ShowMemoryEditor1, ShowMemoryEditor2, ShowMemoryEditor3, ShowMemoryEditor4,
+             ShowMemoryEditor5, ShowMemoryEditor6, ShowMemoryEditor7, ShowMemoryEditor8, ShowParallelPortEditor,
+             ShowScratchpadEditor, ShowHWRegsEditor, ShowBiosEditor, ShowVRAMEditor, MemoryEditor1Addr,
+             MemoryEditor2Addr, MemoryEditor3Addr, MemoryEditor4Addr, MemoryEditor5Addr, MemoryEditor6Addr,
+             MemoryEditor7Addr, MemoryEditor8Addr, ParallelPortEditorAddr, ScratchpadEditorAddr, HWRegsEditorAddr,
+             BiosEditorAddr, VRAMEditorAddr, ShowMsanViewer>
         settings;
 
     // imgui can't handle more than one "instance", so...
-    void (*m_createWindowOldCallback)(ImGuiViewport *viewport) = nullptr;
     void (*m_onChangedViewportOldCallback)(ImGuiViewport *viewport) = nullptr;
     void (*m_destroyWindowOldCallback)(ImGuiViewport *viewport) = nullptr;
-    static void glfwKeyCallbackTrampoline(GLFWwindow *window, int key, int scancode, int action, int mods) {
-        g_gui->glfwKeyCallback(window, key, scancode, action, mods);
-    }
-    void glfwKeyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
-#ifndef PCSX_METAL
     void glErrorCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *message);
+    void changeScale(float scale);
     bool m_onlyLogGLErrors = false;
     std::vector<std::string> m_glErrors;
-#endif
-    void changeScale(float scale);
 
   public:
     struct MarkDown : public imgui_md {
@@ -200,14 +210,6 @@ class GUI final : public UI {
         static unsigned m_id;
     };
     static void openUrl(std::string_view url);
-#ifdef PCSX_METAL
-    void setOnlyLogGLErrors(bool) {}
-    class ScopedOnlyLog {
-      public:
-        ScopedOnlyLog(GUI *) {}
-    };
-    std::vector<std::string> getGLerrors() { return {}; }
-#else
     void setOnlyLogGLErrors(bool value) { m_onlyLogGLErrors = value; }
     class ScopedOnlyLog {
       public:
@@ -218,7 +220,6 @@ class GUI final : public UI {
         GUI *m_gui = nullptr;
     };
     std::vector<std::string> getGLerrors() { return std::move(m_glErrors); }
-#endif
     GUI(std::vector<std::string> &favorites);
     ~GUI() {
         assert(g_gui == this);
@@ -293,6 +294,9 @@ class GUI final : public UI {
 
   private:
     void saveCfg();
+    void resetSettings();
+    bool m_settingsNuked = false;
+    bool m_showResetSettings = false;
 
     void startFrame();
     void endFrame();
@@ -306,22 +310,31 @@ class GUI final : public UI {
     const ImVec2 &getRenderSize() { return m_renderSize; }
 
   private:
-    GLFWwindow *m_window = nullptr;
+    SDL_Window *m_window = nullptr;
+    SDL_GLContext m_glContext = nullptr;
 #ifdef PCSX_METAL
     void *m_metalCtx = nullptr;
-#else
+#endif
     bool m_hasCoreProfile = false;
-#endif
-    int &m_glfwPosX = settings.get<WindowPosX>().value;
-    int &m_glfwPosY = settings.get<WindowPosY>().value;
-    int &m_glfwSizeX = settings.get<WindowSizeX>().value;
-    int &m_glfwSizeY = settings.get<WindowSizeY>().value;
-    bool &m_glfwMaximized = settings.get<WindowMaximized>().value;
-#ifndef PCSX_METAL
+    int &m_windowPosX = settings.get<WindowPosX>().value;
+    int &m_windowPosY = settings.get<WindowPosY>().value;
+    int &m_windowSizeX = settings.get<WindowSizeX>().value;
+    int &m_windowSizeY = settings.get<WindowSizeY>().value;
+    bool &m_windowMaximized = settings.get<WindowMaximized>().value;
     GLuint m_VRAMTexture = 0;
-    NVGcontext *m_nvgContext = nullptr;
-    std::map<unsigned, void *> m_nvgSubContextes;
-#endif
+    struct TvgViewport {
+        tvg::GlCanvas *canvas = nullptr;
+        tvg::Scene *root = nullptr;
+        tvg::Scene *transient = nullptr;
+        void *glContext = nullptr;
+        int width = 0;
+        int height = 0;
+    };
+    std::map<unsigned, TvgViewport> m_tvgViewports;
+    bool m_tvgInitialized = false;
+    TvgViewport *getTvgViewport(unsigned viewportId);
+    void renderTvgViewport(ImGuiViewport *viewport, SDL_Window *window);
+    void destroyTvgViewport(unsigned viewportId, SDL_Window *window);
     std::vector<ImWchar> m_baseFontRanges;
 
     unsigned int m_offscreenFrameBuffer = 0;
@@ -330,7 +343,7 @@ class GUI final : public UI {
     int m_currentTexture = 0;
 
     ImVec4 m_backgroundColor = ImColor(114, 144, 154);
-    ImVec2 m_framebufferSize = ImVec2(1, 1);  // Size of GLFW window framebuffer
+    ImVec2 m_framebufferSize = ImVec2(1, 1);  // Size of the SDL window framebuffer (in pixels)
     ImVec2 m_renderSize = ImVec2(1, 1);
     ImVec2 m_outputWindowSize = ImVec2(1, 1);
 
@@ -341,6 +354,7 @@ class GUI final : public UI {
     int &m_idleSwapInterval = {settings.get<IdleSwapInterval>().value};
     bool m_showThemes = false;
     bool m_showDemo = false;
+    bool m_showImPlotDemo = false;
     bool m_showHandles = false;
     bool m_showAbout = false;
     bool m_showInterruptsScaler = false;
@@ -359,7 +373,27 @@ class GUI final : public UI {
         std::function<const char *()> title;
 
         void MenuItem() { ImGui::MenuItem(title(), nullptr, &m_show); }
-        void draw(void *mem, size_t size) { editor.DrawWindow(title(), mem, size); }
+        void draw(void *mem, size_t size) {
+            editor.ReadFn = [mem](size_t off) -> ImU8 { return ((ImU8 *)mem)[off]; };
+            editor.WriteFn = [mem](size_t off, ImU8 d) { ((ImU8 *)mem)[off] = d; };
+            editor.Cache.BulkReadFn = [mem](void *dest, size_t off, size_t len) {
+                memcpy(dest, (ImU8 *)mem + off, len);
+            };
+            editor.DrawWindow(title(), size);
+        }
+        void draw(IO<File> file, size_t size) {
+            IO<File> sub(new SubFile(file, m_baseAddr, size, FileOps::READWRITE));
+            editor.ReadFn = [sub](size_t off) mutable -> ImU8 {
+                ImU8 b;
+                sub->readAt(&b, 1, off);
+                return b;
+            };
+            editor.WriteFn = [sub](size_t off, ImU8 d) mutable { sub->writeAt(&d, 1, off); };
+            editor.Cache.BulkReadFn = [sub](void *dest, size_t off, size_t len) mutable {
+                sub->readAt(dest, len, off);
+            };
+            editor.DrawWindow(title(), size);
+        }
     };
     std::string m_stringHolder;
     const size_t wramBaseAddr = 0x80000000;
@@ -410,6 +444,8 @@ class GUI final : public UI {
                                             {settings.get<ShowVRAMViewer3>().value},
                                             {settings.get<ShowVRAMViewer4>().value}};
 
+    Widgets::RAMViewer m_ramViewer = {settings.get<ShowRAMViewer>().value};
+    Widgets::CDRomViewer m_cdromViewer = {settings.get<ShowCDRomViewer>().value};
     Widgets::LuaEditor m_luaEditor = {settings.get<ShowLuaEditor>().value};
 
     Widgets::Events m_events = {settings.get<ShowEvents>().value};
@@ -419,9 +455,13 @@ class GUI final : public UI {
     Widgets::CallStacks m_callstacks = {settings.get<ShowCallstacks>().value};
 
     Widgets::PIOCart m_pioCart;
+    Widgets::GPUDump m_gpuDump;
     Widgets::SIO1 m_sio1 = {settings.get<ShowSIO1>().value};
 
     Widgets::GPULogger m_gpuLogger{settings.get<ShowGPULogger>().value};
+    Widgets::HeapViewer m_heapViewer{settings.get<ShowHeapViewer>().value};
+    Widgets::HWRegs m_hwRegs{settings.get<ShowHWRegs>().value};
+    Widgets::MsanViewer m_msanViewer{settings.get<ShowMsanViewer>().value};
 
     EventBus::Listener m_listener;
 
@@ -452,9 +492,7 @@ class GUI final : public UI {
     Widgets::LuaInspector m_luaInspector = {settings.get<ShowLuaInspector>().value};
 
     bool m_gotImguiUserError = false;
-#ifndef PCSX_METAL
     bool m_reportGLErrors = false;
-#endif
     std::string m_imguiUserError;
 
     std::map<float, ImFont *> m_mainFonts;
@@ -488,12 +526,26 @@ class GUI final : public UI {
     Widgets::ShaderEditor m_offscreenShaderEditor = {"offscreen"};
     ImFont *getMainFont() { return findClosestFont(m_mainFonts); }
     ImFont *getMonoFont() { return findClosestFont(m_monoFonts); }
-    void useMainFont() { ImGui::PushFont(getMainFont()); }
-    void useMonoFont() { ImGui::PushFont(getMonoFont()); }
+    // ImGui v1.92's PushFont takes a size. We pass the closest-matching font's
+    // LegacySize (the size that was passed to AddFontFromFileTTF) so the
+    // per-scale font map continues to drive rendering size, matching pre-1.92
+    // PushFont(font) semantics. Passing 0.0f instead would mean "keep current
+    // size" which would render the larger DPI-baked font at the previous
+    // smaller base size, defeating the per-scale map entirely.
+    void useMainFont() {
+        ImFont *f = getMainFont();
+        ImGui::PushFont(f, f ? f->LegacySize : 0.0f);
+    }
+    void useMonoFont() {
+        ImFont *f = getMonoFont();
+        ImGui::PushFont(f, f ? f->LegacySize : 0.0f);
+    }
 
     bool &allowMouseCaptureToggle() { return settings.get<AllowMouseCaptureToggle>().value; }
     bool &isRawMouseMotionEnabled() { return settings.get<EnableRawMouseMotion>().value; }
 
+    // Returns the root scene drawn on top of the given viewport, in ImGui coordinates.
+    tvg::Scene *getTvgViewportScene(unsigned viewportId);
     void drawBezierArrow(float width, ImVec2 start, ImVec2 c1, ImVec2 c2, ImVec2 end,
                          ImVec4 innerColor = {1.0f, 1.0f, 1.0f, 1.0f}, ImVec4 outerColor = {0.5f, 0.5f, 0.5f, 1.0f});
 };  // namespace PCSX
