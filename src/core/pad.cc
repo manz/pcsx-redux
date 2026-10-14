@@ -579,6 +579,8 @@ void PadsImpl::Pad::getButtons() {
     const auto& inputType = m_settings.get<SettingInputType>();
 
     auto getKeyboardButtons = [this]() -> uint16_t {
+        // headless (-no-ui) has no ImGui context; reading keys would crash.
+        if (ImGui::GetCurrentContext() == nullptr) return 0xffff;  // no keys pressed
         uint16_t result = 0;
         for (unsigned i = 0; i < 16; i++) {
             auto key = GlfwKeyToImGuiKey(m_scancodes[i]);

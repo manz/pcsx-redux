@@ -400,6 +400,7 @@ void PCSX::Debug::stepOut() {
 
 void PCSX::Debug::updatedPC(uint32_t pc) {
     IO<File> memFile = g_emulator->m_mem->getMemoryAsFile();
+    if (!memFile) return;  // memory not mapped yet (early bootstrap reset); nothing to trace
     uint32_t code = memFile->readAt<uint32_t>(pc);
     process(pc, pc, code, code, false);
 }

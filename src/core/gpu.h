@@ -99,7 +99,8 @@ class GPU {
     }
     virtual void pgxpMemory(unsigned int addr, unsigned char *pVRAM) {}
     virtual void pgxpCacheVertex(short sx, short sy, const unsigned char *_pVertex) {
-        throw std::runtime_error("Not yet implemented");
+        // no-op: base/software GPU has no PGXP vertex cache; throwing here crashed
+        // headless (-softgpu) as soon as the game issued a GTE transform.
     }
 
     virtual void setDither(int setting) = 0;
