@@ -278,6 +278,10 @@ class DynaRecCPU final : public PCSX::R3000Acpu {
                                                bool fullLoadDelayEmulation) {
         return that->recompile(callback, that->m_regs.pc, true, fullLoadDelayEmulation);
     }
+    static DynarecCallback recRecompileFullLoadDelaysWrapper(DynaRecCPU* that) {
+        const uint32_t pc = that->m_regs.pc;
+        return that->recompile(that->getBlockPointer(pc), pc, true, true);
+    }
 
     template <uint32_t pc>
     static void interceptKernelCallWrapper(DynaRecCPU* that) {

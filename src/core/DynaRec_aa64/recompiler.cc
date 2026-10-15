@@ -226,14 +226,13 @@ void DynaRecCPU::emitDispatcher() {
     gen.Br(x0);  // Jump to compiled block
 
     // Code for recompiling the current block with full load delay support. Reached from the check at the top of a
-    // block that was compiled without it, so x0 and x3 still hold what emitBlockLookup left there.
+    // block that was compiled without it. The block may have been entered through a link rather than through
+    // emitBlockLookup, in which case x0 and x3 don't describe its LUT slot, so the slot is looked up from the PC.
     gen.align();
     m_needFullLoadDelays = gen.getCurr<DynarecCallback>();
 
-    gen.Add(arg2.X(), x0, Operand(x3, LSL, 3));
     loadThisPointer(arg1.X());
-    gen.Mov(arg3, 1);  // Fully emulate load delays
-    call(recRecompileWrapper);
+    call(recRecompileFullLoadDelaysWrapper);
     gen.Br(x0);  // Jump to the newly compiled block
 
     // Code for committing a load delay inherited from the previous block. Writes the pending value straight into
