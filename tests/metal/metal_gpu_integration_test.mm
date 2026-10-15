@@ -53,6 +53,12 @@ class MetalGPUTestEnvironment : public ::testing::Environment {
         emulator = new PCSX::Emulator();
         PCSX::g_emulator = emulator;
     }
+    // Tests that run the full emulator (MainInvoker) tear down and null out the globals when they finish,
+    // so each Metal test puts the stub instances back before touching the GPU.
+    void install() {
+        PCSX::g_system = system;
+        PCSX::g_emulator = emulator;
+    }
     void TearDown() override {
         PCSX::g_emulator = nullptr;
         delete emulator;
@@ -65,7 +71,8 @@ class MetalGPUTestEnvironment : public ::testing::Environment {
 };
 
 // Register the environment (gtest owns it)
-static auto *env = ::testing::AddGlobalTestEnvironment(new MetalGPUTestEnvironment());
+static auto *env =
+    static_cast<MetalGPUTestEnvironment *>(::testing::AddGlobalTestEnvironment(new MetalGPUTestEnvironment()));
 
 // ===========================================================================
 // Integration test fixture using the REAL MetalGPU via public GPU interface
@@ -77,6 +84,7 @@ class MetalGPUIntegrationTest : public ::testing::Test {
     std::unique_ptr<PCSX::GPU> gpu;
 
     void SetUp() override {
+        env->install();
         gpu = PCSX::GPU::getMetal();
         ASSERT_NE(gpu, nullptr);
         int ret = gpu->init(nullptr);
